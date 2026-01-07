@@ -8,7 +8,8 @@
 # Description:
 #   Scans the cluster to find GPU types that are currently available for
 #   immediate use. It parses `sinfo` output to calculate true availability
-#   (Total - Used) and applies strict state filtering.
+#   (Total - Used), enforces minimum CPU/RAM availability, and applies strict
+#   state filtering.
 #
 # Logic:
 #   1. Runs `sinfo` with extended column widths to handle long MIG strings.
@@ -17,43 +18,89 @@
 #      - Down (down, fail)
 #      - Maintenance (maint)
 #      - Unreachable/Not Responding (*)
-#   3. Parses 'Gres' and 'GresUsed' columns using Python regex.
-#   4. Returns a sorted, space-separated list of GPU types that have at
+#   3. Requires at least 10 idle CPU cores and 32 GB available RAM.
+#   4. Parses 'Gres' and 'GresUsed' columns using Python regex.
+#   5. Returns a sorted, space-separated list of GPU types that have at
 #      least one free slot on a valid, active node.
 #
 # Usage:
-#   avail_gpus
+#   avail_gpus [-n]
 #
 # Output Example:
 #   h100 nvidia_h100_80gb_hbm3_1g.10gb nvidia_h100_80gb_hbm3_3g.40gb
+#   h100:4 nvidia_h100_80gb_hbm3_1g.10gb:2 nvidia_h100_80gb_hbm3_3g.40gb:1
 # ------------------------------------------------------------------------------
 avail_gpus() {
+    local show_counts=0
+    local opt
+    local OPTIND=1
+
+    while getopts ":n" opt; do
+        case "$opt" in
+            n) show_counts=1 ;;
+            *) echo "Usage: avail_gpus [-n]" >&2; return 2 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    if [[ $# -ne 0 ]]; then
+        echo "Usage: avail_gpus [-n]" >&2
+        return 2
+    fi
+
     # 1. We include NodeList again to help with debugging/logging.
-    local sinfo_cmd="sinfo -N -h -t idle,mix,alloc -O NodeList:20,StateCompact:20,Gres:5000,GresUsed:5000"
+    local mem_mode="alloc"
+    local sinfo_cmd="sinfo -N -h -t idle,mix,alloc -O NodeList:20,StateCompact:20,CPUsState:20,Memory:20,AllocMem:20,Gres:5000,GresUsed:5000"
+    local sinfo_output
+
+    if ! sinfo_output=$($sinfo_cmd 2>/dev/null); then
+        mem_mode="total"
+        sinfo_cmd="sinfo -N -h -t idle,mix,alloc -O NodeList:20,StateCompact:20,CPUsState:20,Memory:20,Gres:5000,GresUsed:5000"
+        sinfo_output=$($sinfo_cmd) || return 1
+    fi
     
-    $sinfo_cmd | python3 -c "
+    printf '%s\n' "$sinfo_output" | python3 -c "
 import sys, re
+
+show_counts = (len(sys.argv) > 1 and sys.argv[1] == '1')
+mem_mode = sys.argv[2] if len(sys.argv) > 2 else 'alloc'
 
 pattern = re.compile(r'gpu:([^:\s]+):(\d+)')
 available_types = set()
+available_counts = {}
 
 # Debug counters
 skipped_bad_state = 0
 skipped_no_gres = 0
+skipped_cpu = 0
+skipped_mem = 0
+
+MIN_IDLE_CPU = 10
+MIN_AVAIL_MEM_MB = 32768
 
 # States that are definitely broken/unusable
 # (Note: We do NOT filter 'mix-' specifically, only explicit drain/fail flags)
 bad_states = ['drain', 'drng', 'down', 'fail', 'maint']
 
+def parse_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 for line in sys.stdin:
     parts = line.strip().split()
-    if len(parts) < 3: continue
+    if len(parts) < 4: continue
 
     # 2. Dynamic Column Parsing
     # We explicitly look for the columns containing 'gpu:' to handle weird spacing
     # default structure: Node [0], State [1], Gres [?], GresUsed [?]
     node = parts[0]
     state = parts[1].lower()
+
+    cpu_state_str = parts[2] if len(parts) > 2 else None
+    mem_total = parse_int(parts[3]) if len(parts) > 3 else None
+    alloc_mem = parse_int(parts[4]) if mem_mode == 'alloc' and len(parts) > 4 else None
     
     gres_total_str = next((p for p in parts[2:] if 'gpu:' in p), '(null)')
     # Used is the *last* gpu-like column, or (null)
@@ -65,6 +112,24 @@ for line in sys.stdin:
         # Print to stderr so user sees it, but doesn't corrupt stdout for scripts
         # sys.stderr.write(f'DEBUG: Skipping {node} ({state})\n')
         skipped_bad_state += 1
+        continue
+
+    # 3. Filter: Require minimum CPU and memory availability
+    idle_cpu = None
+    if cpu_state_str and re.match(r'^\d+/\d+/\d+/\d+$', cpu_state_str):
+        idle_cpu = int(cpu_state_str.split('/')[1])
+    if idle_cpu is None or idle_cpu < MIN_IDLE_CPU:
+        skipped_cpu += 1
+        continue
+
+    mem_available = None
+    if mem_total is not None:
+        if mem_mode == 'alloc':
+            mem_available = mem_total - alloc_mem if alloc_mem is not None else mem_total
+        else:
+            mem_available = mem_total
+    if mem_available is None or mem_available < MIN_AVAIL_MEM_MB:
+        skipped_mem += 1
         continue
 
     if gres_total_str == '(null)': 
@@ -82,16 +147,28 @@ for line in sys.stdin:
             used[m.group(1)] = used.get(m.group(1), 0) + int(m.group(2))
 
     for g_type, total_count in totals.items():
-        if total_count - used.get(g_type, 0) > 0:
-            available_types.add(g_type)
+        free_count = total_count - used.get(g_type, 0)
+        if free_count > 0:
+            if show_counts:
+                available_counts[g_type] = available_counts.get(g_type, 0) + free_count
+            else:
+                available_types.add(g_type)
 
 # Output results
-print(' '.join(sorted(available_types)))
+if show_counts:
+    print(' '.join(f'{g}:{available_counts[g]}' for g in sorted(available_counts)))
+else:
+    print(' '.join(sorted(available_types)))
 
 # Optional: Print summary to stderr if list is suspiciously empty
-if not available_types and skipped_bad_state > 0:
-    sys.stderr.write(f'Warning: No GPUs found. {skipped_bad_state} nodes were skipped due to state (drain/maint/down).\n')
-"
+found_any = bool(available_counts) if show_counts else bool(available_types)
+if not found_any and (skipped_bad_state + skipped_cpu + skipped_mem) > 0:
+    sys.stderr.write(
+        'Warning: No GPUs found. '
+        f'{skipped_bad_state} nodes skipped for state, '
+        f'{skipped_cpu} for CPU, {skipped_mem} for memory.\n'
+    )
+" "$show_counts" "$mem_mode"
 }
 # ------------------------------------------------------------------------------
 # Function: sbt (Smart Batch Tail)
