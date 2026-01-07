@@ -175,8 +175,8 @@ sbt() {
 
     echo "--> Submitted Job ID: $jobid"
     local outfile="slurm-${jobid}.out"
-    echo "--> Tailing ${outfile} (Ctrl+C to stop)"
-    echo "--------------------------------------------------"
+    echo "tail -F ${outfile}"
+    echo "(Ctrl+C to stop)--------------------------------------------------"
     tail -F "${outfile}"
 }
 
