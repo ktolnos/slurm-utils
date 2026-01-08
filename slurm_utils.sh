@@ -287,6 +287,8 @@ sbt() {
     # -- Step A: Parse the script for #SELECTGPU --
     local gpu_priority_line
     gpu_priority_line=$(grep "^#SELECTGPU" "$script_file" | head -n 1 | sed 's/^#SELECTGPU //')
+    local time_limit
+    time_limit=$(grep -E "^#SBATCH[[:space:]]+--time(=|[[:space:]])" "$script_file" | head -n 1 | sed -E "s/^#SBATCH[[:space:]]+--time(=|[[:space:]])//; s/[[:space:]].*$//")
     
     local selected_gres=""
 
@@ -295,7 +297,12 @@ sbt() {
         
         # -- Step B: Call the helper function --
         local available_types
-        available_types=$(avail_gpus)
+        if [[ -n "$time_limit" ]]; then
+            echo "--> Using partition MaxTime filter: $time_limit"
+            available_types=$(avail_gpus -t "$time_limit")
+        else
+            available_types=$(avail_gpus)
+        fi
         
         echo "--> Currently available types: [ $available_types ]"
 
