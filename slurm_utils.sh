@@ -203,6 +203,7 @@ for line in sys.stdin:
     if idle_cpu is None or idle_cpu < MIN_IDLE_CPU:
         skipped_cpu += 1
         continue
+        
 
     mem_available = None
     if mem_total is not None:
