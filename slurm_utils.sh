@@ -53,7 +53,7 @@ avail_gpus() {
 
     local partition_filter=""
     if [[ -n "$max_time" ]]; then
-        partition_filter=$(scontrol show partition -o 2>/dev/null | python3 - "$max_time" -c "
+        partition_filter=$(scontrol show partition -o 2>/dev/null | python3 -c "
 import sys, re, math
 
 def parse_time_to_seconds(value):
@@ -105,7 +105,7 @@ for line in sys.stdin:
         allowed.append(m_name.group(1))
 
 print(','.join(allowed))
-")
+" "$max_time")
         local partition_status=$?
         if [[ $partition_status -eq 2 ]]; then
             echo "Usage: avail_gpus [-n] [-t <max_time>]" >&2
