@@ -18,13 +18,14 @@
 #      - Down (down, fail)
 #      - Maintenance (maint)
 #      - Unreachable/Not Responding (*)
-#   3. Requires at least 10 idle CPU cores and 32 GB available RAM.
-#   4. Parses 'Gres' and 'GresUsed' columns using Python regex.
-#   5. Returns a sorted, space-separated list of GPU types that have at
+#   3. Optionally filters partitions by MaxTime (must be >= requested).
+#   4. Requires at least 10 idle CPU cores and 32 GB available RAM.
+#   5. Parses 'Gres' and 'GresUsed' columns using Python regex.
+#   6. Returns a sorted, space-separated list of GPU types that have at
 #      least one free slot on a valid, active node.
 #
 # Usage:
-#   avail_gpus [-n]
+#   avail_gpus [-n] [-t <max_time>]
 #
 # Output Example:
 #   h100 nvidia_h100_80gb_hbm3_1g.10gb nvidia_h100_80gb_hbm3_3g.40gb
@@ -34,28 +35,106 @@ avail_gpus() {
     local show_counts=0
     local opt
     local OPTIND=1
+    local max_time=""
 
-    while getopts ":n" opt; do
+    while getopts ":nt:" opt; do
         case "$opt" in
             n) show_counts=1 ;;
-            *) echo "Usage: avail_gpus [-n]" >&2; return 2 ;;
+            t) max_time="$OPTARG" ;;
+            *) echo "Usage: avail_gpus [-n] [-t <max_time>]" >&2; return 2 ;;
         esac
     done
     shift $((OPTIND - 1))
 
     if [[ $# -ne 0 ]]; then
-        echo "Usage: avail_gpus [-n]" >&2
+        echo "Usage: avail_gpus [-n] [-t <max_time>]" >&2
         return 2
+    fi
+
+    local partition_filter=""
+    if [[ -n "$max_time" ]]; then
+        partition_filter=$(scontrol show partition -o 2>/dev/null | python3 - "$max_time" -c "
+import sys, re, math
+
+def parse_time_to_seconds(value):
+    value = value.strip()
+    if not value:
+        return None
+    lower = value.lower()
+    if lower in ('infinite', 'unlimited'):
+        return math.inf
+    days = 0
+    if '-' in value:
+        days_part, value = value.split('-', 1)
+        try:
+            days = int(days_part)
+        except ValueError:
+            return None
+    parts = value.split(':')
+    try:
+        if len(parts) == 3:
+            hours, minutes, seconds = (int(p) for p in parts)
+        elif len(parts) == 2:
+            hours, minutes = (int(p) for p in parts)
+            seconds = 0
+        elif len(parts) == 1:
+            hours = 0
+            minutes = int(parts[0])
+            seconds = 0
+        else:
+            return None
+    except ValueError:
+        return None
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+req = parse_time_to_seconds(sys.argv[1])
+if req is None:
+    sys.stderr.write(f'Invalid max-time: {sys.argv[1]}\\n')
+    sys.exit(2)
+
+allowed = []
+for line in sys.stdin:
+    m_name = re.search(r'PartitionName=(\\S+)', line)
+    m_time = re.search(r'MaxTime=(\\S+)', line)
+    if not m_name or not m_time:
+        continue
+    max_time = parse_time_to_seconds(m_time.group(1))
+    if max_time is None:
+        continue
+    if max_time >= req:
+        allowed.append(m_name.group(1))
+
+print(','.join(allowed))
+")
+        local partition_status=$?
+        if [[ $partition_status -eq 2 ]]; then
+            echo "Usage: avail_gpus [-n] [-t <max_time>]" >&2
+            return 2
+        elif [[ $partition_status -ne 0 ]]; then
+            echo "Warning: failed to parse partition MaxTime; proceeding without partition filter." >&2
+            partition_filter=""
+        elif [[ -z "$partition_filter" ]]; then
+            echo "Warning: no partitions with MaxTime >= $max_time" >&2
+            return 0
+        fi
     fi
 
     # 1. We include NodeList again to help with debugging/logging.
     local mem_mode="alloc"
-    local sinfo_cmd="sinfo -N -h -t idle,mix,alloc -O NodeList:20,StateCompact:20,CPUsState:20,Memory:20,AllocMem:20,Gres:5000,GresUsed:5000"
+    local sinfo_cmd="sinfo -N -h -t idle,mix,alloc"
+    if [[ -n "$partition_filter" ]]; then
+        sinfo_cmd+=" -p $partition_filter"
+    fi
+    sinfo_cmd+=" -O NodeList:20,StateCompact:20,CPUsState:20,Memory:20,AllocMem:20,Gres:5000,GresUsed:5000"
     local sinfo_output
 
     if ! sinfo_output=$($sinfo_cmd 2>/dev/null); then
         mem_mode="total"
-        sinfo_cmd="sinfo -N -h -t idle,mix,alloc -O NodeList:20,StateCompact:20,CPUsState:20,Memory:20,Gres:5000,GresUsed:5000"
+        sinfo_cmd="sinfo -N -h -t idle,mix,alloc"
+        if [[ -n "$partition_filter" ]]; then
+            sinfo_cmd+=" -p $partition_filter"
+        fi
+        sinfo_cmd+=" -O NodeList:20,StateCompact:20,CPUsState:20,Memory:20,Gres:5000,GresUsed:5000"
         sinfo_output=$($sinfo_cmd) || return 1
     fi
     
@@ -68,6 +147,7 @@ mem_mode = sys.argv[2] if len(sys.argv) > 2 else 'alloc'
 pattern = re.compile(r'gpu:([^:\s]+):(\d+)')
 available_types = set()
 available_counts = {}
+seen_nodes = set()
 
 # Debug counters
 skipped_bad_state = 0
@@ -96,6 +176,8 @@ for line in sys.stdin:
     # We explicitly look for the columns containing 'gpu:' to handle weird spacing
     # default structure: Node [0], State [1], Gres [?], GresUsed [?]
     node = parts[0]
+    if node in seen_nodes:
+        continue
     state = parts[1].lower()
 
     cpu_state_str = parts[2] if len(parts) > 2 else None
@@ -132,9 +214,11 @@ for line in sys.stdin:
         skipped_mem += 1
         continue
 
-    if gres_total_str == '(null)': 
+    if gres_total_str == '(null)':
         skipped_no_gres += 1
         continue
+
+    seen_nodes.add(node)
     
     # 4. Math
     totals = {}
