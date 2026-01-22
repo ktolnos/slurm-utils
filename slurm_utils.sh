@@ -125,7 +125,7 @@ print(','.join(allowed))
     if [[ -n "$partition_filter" ]]; then
         sinfo_cmd+=" -p $partition_filter"
     fi
-    sinfo_cmd+=" -O NodeList:20,StateCompact:20,CPUsState:20,Memory:20,AllocMem:20,Gres:5000,GresUsed:5000"
+    sinfo_cmd+=" -O NodeList:40,StateCompact:20,CPUsState:20,Memory:20,AllocMem:20,Gres:5000,GresUsed:5000"
     local sinfo_output
 
     if ! sinfo_output=$($sinfo_cmd 2>/dev/null); then
@@ -134,7 +134,7 @@ print(','.join(allowed))
         if [[ -n "$partition_filter" ]]; then
             sinfo_cmd+=" -p $partition_filter"
         fi
-        sinfo_cmd+=" -O NodeList:20,StateCompact:20,CPUsState:20,Memory:20,Gres:5000,GresUsed:5000"
+        sinfo_cmd+=" -O NodeList:40,StateCompact:20,CPUsState:20,Memory:20,Gres:5000,GresUsed:5000"
         sinfo_output=$($sinfo_cmd) || return 1
     fi
     
