@@ -284,7 +284,15 @@ sbt() {
         return 1
     fi
 
-    # -- Step A: Parse the script for #SELECTGPU --
+    # -- Step A1: Capture git commit message if available --
+    # We capture this at submission time so the job gets the commit
+    # message corresponding to the code state when sbt was run.
+    local last_commit_msg=""
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        last_commit_msg=$(git log -1 --pretty=%s)
+    fi
+
+    # -- Step A2: Parse the script for #SELECTGPU --
     local gpu_priority_line
     gpu_priority_line=$(grep "^#SELECTGPU" "$script_file" | head -n 1 | sed 's/^#SELECTGPU //')
     local time_limit
@@ -335,7 +343,14 @@ sbt() {
     fi
 
     local jobid
-    jobid=$(sbatch --parsable "${args[@]}")
+    if [[ -n "$last_commit_msg" ]]; then
+        # Export LAST_COMMIT_MESSAGE to the job environment.
+        # We prepend --export=ALL,LAST_COMMIT_MESSAGE to ensure it's passed.
+        # The temporary environment variable is set only for this command execution.
+        jobid=$(LAST_COMMIT_MESSAGE="$last_commit_msg" sbatch --parsable --export=ALL,LAST_COMMIT_MESSAGE "${args[@]}")
+    else
+        jobid=$(sbatch --parsable "${args[@]}")
+    fi
 
     if [[ -z "$jobid" ]]; then
         echo "sbatch command failed." >&2
