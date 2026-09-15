@@ -158,6 +158,13 @@ Import the portable rules with the **absolute** path
 through a symlink, so a relative import resolves against the wrong directory.
 Leave a TODO rather than guessing a number you have not measured.
 
+That absolute path points outside the root, which makes it an **external**
+include -- gated behind a one-time per-root dialog that a batch job has nobody
+to answer, so without it every slot comes up parked on *"Yes, allow external
+imports"*. `devbox-up` preflight approves it for this root before submitting, so
+there is nothing to do here; it is called out only because the failure looks
+like the agents started fine.
+
 Where the root is an existing project repo, git-ignore the two symlinks — they
 point into `$HOME` and mean nothing in a fresh clone:
 

@@ -61,6 +61,48 @@ if cfg.get("projects",{}).get(root,{}).get("hasTrustDialogAccepted") is not True
     sys.exit(1)
 PY
     fi
+
+    # AGENTS.md reaches the portable rules through an absolute
+    # @~/slurm-utils/devbox/AGENTS.shared.md path, which counts as an EXTERNAL
+    # include -- so on a root that has never approved one, every slot comes up
+    # parked on "Yes, allow external imports" and sits there forever. Same shape
+    # as the trust dialog: interactive, per-root, and fatal to a batch job that
+    # has nobody to answer it. It bit all three slots on killarney's first run.
+    #
+    # Unlike trust, this one is seedable: hasClaudeMdExternalIncludesApproved is
+    # a plain persisted boolean in ~/.claude.json's per-project entry, with no
+    # home-directory special case and no settings.json or environment equivalent
+    # (checked against 2.1.273 -- the dialog and /config are the only other ways
+    # to set it). So set it here rather than make every new cluster rediscover it.
+    #
+    # Read-modify-write with an atomic rename, touching one key of one project
+    # and no-oping when already true, because live agents write this file too.
+    if [ -f "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$DEVBOX_ROOT" <<'SEED'
+import json, os, sys, tempfile
+root = sys.argv[1]
+path = os.path.expanduser("~/.claude.json")
+try:
+    with open(path) as fh: cfg = json.load(fh)
+except Exception as e:
+    print(f"  note: could not read ~/.claude.json ({e}) -- external includes not seeded")
+    sys.exit(0)
+proj = cfg.setdefault("projects", {}).setdefault(root, {})
+if proj.get("hasClaudeMdExternalIncludesApproved") is True:
+    sys.exit(0)
+proj["hasClaudeMdExternalIncludesApproved"] = True
+proj["hasClaudeMdExternalIncludesWarningShown"] = True
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
+try:
+    with os.fdopen(fd, "w") as fh: json.dump(cfg, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)          # atomic: never a half-written config
+except Exception:
+    if os.path.exists(tmp): os.unlink(tmp)
+    raise
+print(f"  approved @-imports in CLAUDE.md/AGENTS.md for {root}")
+SEED
+    fi
     return $bad
 }
 

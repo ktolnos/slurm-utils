@@ -345,7 +345,7 @@ ls -t ~/.claude/projects/-home-eop-devbox/*.jsonl | head -1 \
   | xargs -n1 basename | sed 's/\.jsonl$//' > ~/.devbox/$CC_CLUSTER/session-id-1
 ```
 
-## Two things that bit the first real run of `devbox.sh`
+## Three things that bit the first real run of `devbox.sh`
 
 Killarney job 5466901 was the first job to actually run the *ported* script --
 every earlier green run, on either cluster, was still the pre-port
@@ -392,6 +392,32 @@ It is only fatal when no server exists yet, so `devbox-up status` and `attach`
 are unaffected -- but `--export=ALL` would have handed the same poisoned `$TMUX`
 to every job in the chain, so one restart from a pane breaks the box forever.
 `devbox.sh` and `devbox-up submit` both `unset TMUX TMUX_PANE`.
+
+### `@`-imports in `AGENTS.md` need a one-time approval per root
+
+`AGENTS.md` pulls in the shared rules with an absolute
+`@~/slurm-utils/devbox/AGENTS.shared.md`, which has to be absolute because the
+file is read through a symlink -- but a path outside the root is an *external*
+include, and Claude Code gates those behind a dialog:
+
+```
+❯ No, disable external imports
+  Yes, allow external imports
+```
+
+All three slots came up on it and sat there. It looks like a healthy box from
+the outside: the job is RUNNING, tmux has its windows, every pane's foreground
+process is `claude`, so the watchdog is satisfied -- and not one agent is
+reachable.
+
+It is the trust dialog's shape (interactive, per-root, unanswerable from a batch
+job) but not its substance: `hasClaudeMdExternalIncludesApproved` is a plain
+persisted boolean in `~/.claude.json`'s per-project entry, with no home-directory
+special case and no `settings.json` or environment equivalent -- the dialog and
+`/config` are the only other ways to set it (checked against 2.1.273). So unlike
+trust it can simply be seeded, and `devbox-up` preflight now does, atomically and
+idempotently, touching one key of one project because live agents write that file
+too. A new cluster never meets the dialog.
 
 ## Caveats inherited from Killarney (all still apply)
 
