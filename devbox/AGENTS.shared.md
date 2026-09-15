@@ -96,10 +96,5 @@ Cache redirects (`HF_HOME`, `UV_CACHE_DIR`, `TMPDIR`, `WANDB_*`, …) belong in
 
 ## Shell traps that have bitten us
 
-- A `~/.bashrc` that overrides `cd` with a function returning some *other*
-  command's status (a venv `activate`, say) makes `cd x && y` silently skip `y`
-  — the command appears to succeed and does nothing. Use `cd x; y`, or
-  `builtin cd`. This has cost real debugging time more than once; it is the
-  reason `devbox.sh` never chains on `cd`.
-- A `~/.bashrc` that ends with a `cd` into a project means every new tmux window
-  and every job step starts *there*, not in `$HOME`.
+- A `~/.bashrc` that ends with a `cd` into the current project means every new
+  tmux window and every job step starts *there*, not in `$HOME`.
