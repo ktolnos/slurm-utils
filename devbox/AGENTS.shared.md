@@ -5,12 +5,15 @@ from the cluster's own `AGENTS.md` rather than copying it, so a fix lands
 everywhere at once:
 
 ```markdown
-@../slurm-utils/devbox/AGENTS.shared.md
+@~/slurm-utils/devbox/AGENTS.shared.md
 ```
 
-(That path is relative to the file doing the importing — the default session
-root is `~/devbox`, so `../slurm-utils/...` reaches the repo. Adjust it if the
-root is elsewhere.)
+**Absolute, not relative.** A cluster's `AGENTS.md` lives in
+`clusters/<cluster>/` and is read through a symlink from the session root, so a
+relative path resolves against whichever directory the reader arrived by, not
+against this repo. On a root outside `$HOME` it points somewhere that does not
+exist — and a `@`-import that resolves to nothing fails silently, so the shared
+rules are simply absent with no dialog and no error.
 
 Anything with a number in it that differs per cluster — account name, partition
 ladder, GPU flags, quotas, the venv layout — belongs in that cluster's

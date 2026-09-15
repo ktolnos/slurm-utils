@@ -1,26 +1,37 @@
 # Template: a new cluster's AGENTS.md
 
-Copy this into the devbox session root as `AGENTS.md` (default `~/devbox`) and
-fill in the blanks. Everything portable is imported, so this file should stay
-short — if a section here has no cluster-specific number or name in it, it
-probably belongs in `AGENTS.shared.md` instead.
+Copy this into `clusters/<cluster>/AGENTS.md` — in this repo, in git — and
+symlink it into the devbox session root. It lives here rather than in the root
+so there is one copy: a copy in the root drifts from this repo silently, and
+where the root is a project repo it would also be a second place the same
+cluster facts are written down. Everything portable is imported, so this file
+should stay short — if a section here has no cluster-specific number or name in
+it, it probably belongs in `AGENTS.shared.md` instead.
 
 ```bash
-cp ~/slurm-utils/devbox/AGENTS.template.md ~/devbox/AGENTS.md
-# then edit the TODOs; verify with:  head -40 ~/devbox/AGENTS.md
+ROOT=$(devbox-up config | awk '/^root/{print $3}')
+mkdir -p ~/slurm-utils/devbox/clusters/$CC_CLUSTER
+cp ~/slurm-utils/devbox/AGENTS.template.md ~/slurm-utils/devbox/clusters/$CC_CLUSTER/AGENTS.md
+# edit the TODOs, then:
+ln -sfn ~/slurm-utils/devbox/clusters/$CC_CLUSTER/AGENTS.md "$ROOT/AGENTS.md"
+head -40 "$ROOT/AGENTS.md"      # verify it reads through the symlink
 ```
 
-Claude Code reads `CLAUDE.md` by default, so also add a one-line `CLAUDE.md`
-next to it that imports this file. Two files rather than one keeps the name
-working for both Claude Code and other agents:
+Claude Code reads `CLAUDE.md` by default, so the root also needs a `CLAUDE.md`
+that imports this file. Two files rather than one keeps the name working for
+both Claude Code and other agents:
 
 ```bash
-echo '@AGENTS.md' > ~/devbox/CLAUDE.md
+echo '@AGENTS.md' > "$ROOT/CLAUDE.md"   # or add that line to an existing CLAUDE.md
 ```
 
-Both files must live **inside the session root**, because that is the directory
-whose trust is persisted and whose project settings are honoured. A file in
-`$HOME` is not read as project instructions.
+Both must be reachable **inside the session root**, because that is the
+directory whose trust is persisted and whose project settings are honoured — a
+file in `$HOME` is not read as project instructions. The symlink satisfies that;
+its target does not have to be in the root.
+
+Where the root is an existing project repo, git-ignore the symlink and add
+`@AGENTS.md` to that repo's own `CLAUDE.md` rather than overwriting it.
 
 Delete everything above the line when you copy it.
 
@@ -33,7 +44,7 @@ Keep here only rules required for each session, and only things that are true of
 ladder, node layout, queue notes — belongs in a separate `CLUSTER.md` that
 nobody reads unless they need it.
 
-@../slurm-utils/devbox/AGENTS.shared.md
+@~/slurm-utils/devbox/AGENTS.shared.md
 
 ## This cluster
 
