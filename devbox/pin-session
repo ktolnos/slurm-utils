@@ -1,0 +1,42 @@
+#!/bin/bash
+# SessionStart hook for the devbox slots: keep $DEVBOX_STATE/session-id-$SLOT
+# pointing at the conversation the slot is ACTUALLY in.
+#
+# Why this exists: /clear (and /resume onto another conversation) mints a new
+# conversation id inside the same process, so the id the job pinned at launch
+# goes stale -- and the next job in the chain would resume the abandoned
+# pre-/clear conversation, silently dropping everything done after it. Measured:
+# a slot launched as --session-id 5a9ce381 was on 8ea4b2a3 after one /clear.
+# Fires on startup, resume and clear, so the pin follows the live conversation.
+#
+# Install once per cluster, in the session root's .claude/settings.json
+# (~/devbox/.claude/settings.json by default):
+#   {"hooks":{"SessionStart":[{"hooks":[
+#      {"type":"command","command":"$HOME/slurm-utils/devbox/pin-session"}]}]}}
+#
+# No-op outside a devbox slot: DEVBOX_SLOT is set only by devbox.sh, so this is
+# harmless in every other session that shares the same settings file.
+[ -n "$DEVBOX_SLOT" ] || exit 0
+[ -n "$DEVBOX_STATE" ] || exit 0
+case "$DEVBOX_SLOT" in
+    [0-9]|[0-9][0-9]) ;;                  # a slot number, not a path fragment
+    *) exit 0 ;;
+esac
+
+payload=$(cat)
+id=$(printf '%s' "$payload" \
+     | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F-]\{36\}\)".*/\1/p' \
+     | head -1)
+[ -n "$id" ] || id="$CLAUDE_SESSION_ID"
+case "$id" in
+    ????????-????-????-????-????????????) ;;   # uuid-shaped (8-4-4-4-12)
+    *) exit 0 ;;                               # nothing trustworthy to pin
+esac
+
+f="$DEVBOX_STATE/session-id-$DEVBOX_SLOT"
+[ "$(cat "$f" 2>/dev/null)" = "$id" ] && exit 0
+mkdir -p "$DEVBOX_STATE"
+printf '%s\n' "$id" > "$f"
+chmod 600 "$f"
+printf '%s slot %s -> %s\n' "$(date -Is)" "$DEVBOX_SLOT" "$id" >> "$DEVBOX_STATE/pins.log"
+exit 0

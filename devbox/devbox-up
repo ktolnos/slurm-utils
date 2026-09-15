@@ -1,0 +1,115 @@
+#!/bin/bash
+# Launch / inspect / stop the devbox on whatever cluster you are logged into.
+#
+#   devbox-up            submit the devbox (refuses if one is already queued)
+#   devbox-up status     what is running, which slots, where to reach them
+#   devbox-up attach [N] attach to the tmux session, or straight to slot N
+#   devbox-up restart    resubmit the chain with the current script + config
+#   devbox-up stop       stop the chain (stop file, then cancel)
+#   devbox-up config     print the resolved configuration and sbatch flags
+#
+# Every resource flag comes from config.sh, so `restart` is also how you apply
+# an edit: Slurm snapshots a job script at submit time, so a queued successor
+# keeps running the OLD code until you resubmit it.
+set -u
+DEVBOX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=config.sh
+source "$DEVBOX_DIR/config.sh"
+
+# "$1" is the format; anything after it is passed through to squeue, so
+# `jobs_of '%i' -t PENDING` really filters (an earlier version dropped the
+# filter and happily returned a PENDING job as the one to attach to).
+jobs_of() { local fmt=$1; shift; squeue -u "$USER" -h -n "$DEVBOX_JOB_NAME" -o "$fmt" "$@" 2>/dev/null; }
+running_job() { jobs_of '%i' -t RUNNING | head -1; }
+
+submit() {
+    mkdir -p "$DEVBOX_STATE" "$DEVBOX_LOG_DIR"
+    local flags; mapfile -t flags < <(devbox_sbatch_flags)
+    ( cd "$DEVBOX_SUBMIT_DIR" 2>/dev/null; sbatch "${flags[@]}" --dependency=singleton "$DEVBOX_DIR/devbox.sh" )
+}
+
+preflight() {
+    local bad=0
+    [ -x "$DEVBOX_CLAUDE_BIN" ] || { echo "  MISSING: claude at $DEVBOX_CLAUDE_BIN"; bad=1; }
+    [ -d "$DEVBOX_ROOT" ]       || { echo "  MISSING: session root $DEVBOX_ROOT"; bad=1; }
+    [ -x "$DEVBOX_CODE_BIN" ]   || echo "  note: no code CLI at $DEVBOX_CODE_BIN -- the job runs, without a tunnel"
+    # Trust is the one thing that cannot be fixed from a batch job: a root whose
+    # trust dialog has not been accepted (and persisted) blocks every job in the
+    # chain, and $HOME can never persist it.
+    local key; key=$(printf '%s' "$DEVBOX_ROOT" | sed 's/[^A-Za-z0-9]/-/g')
+    if [ "$DEVBOX_ROOT" = "$HOME" ]; then
+        echo "  FATAL: DEVBOX_ROOT must not be \$HOME -- home trust is session-only and never persists"; bad=1
+    elif [ -f "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$DEVBOX_ROOT" <<'PY' || bad=1
+import json,os,sys
+root=sys.argv[1]
+try: cfg=json.load(open(os.path.expanduser("~/.claude.json")))
+except Exception: sys.exit(0)
+if cfg.get("projects",{}).get(root,{}).get("hasTrustDialogAccepted") is not True:
+    print(f"  FATAL: workspace trust not accepted for {root}")
+    print(f"         run `cd {root} && claude` once, interactively, and accept it")
+    sys.exit(1)
+PY
+    fi
+    return $bad
+}
+
+case "${1:-up}" in
+up)
+    if [ -n "$(jobs_of '%i')" ]; then
+        echo "already queued/running:"; jobs_of '  %i %T %L' ; echo "use 'devbox-up restart' to apply changes"; exit 1
+    fi
+    preflight || { echo "refusing to submit"; exit 1; }
+    submit
+    ;;
+restart)
+    # Cancel only the PENDING successor: the running job keeps your live agents.
+    # Its own successor was queued at its start, so it must go or it will run the
+    # old script.
+    for j in $(jobs_of '%i' -t PENDING); do echo "cancelling pending $j"; scancel "$j"; done
+    sleep 3; preflight || { echo "refusing to submit"; exit 1; }
+    submit
+    ;;
+stop)
+    mkdir -p "$DEVBOX_STATE"; : > "$DEVBOX_STATE/stop"
+    echo "stop file written: $DEVBOX_STATE/stop"
+    scancel -u "$USER" -n "$DEVBOX_JOB_NAME" && echo "cancelled all $DEVBOX_JOB_NAME jobs"
+    echo "remove that file to let the chain start again"
+    ;;
+status)
+    echo "cluster : $DEVBOX_CLUSTER"
+    echo "jobs    :"; jobs_of '  %i %T %M/%L %N' || true
+    local_job=$(running_job)
+    echo "slots   :"
+    for s in $DEVBOX_SLOTS; do
+        f="$DEVBOX_STATE/session-id-$s"
+        printf '  %-18s %s\n' "$DEVBOX_NAME-$s" "$(cat "$f" 2>/dev/null || echo '(not yet started)')"
+    done
+    echo "tunnel  : https://vscode.dev/tunnel/$DEVBOX_NAME"
+    [ -n "$local_job" ] && {
+        echo "windows :"
+        srun --jobid="$local_job" --overlap tmux list-windows -t claude \
+             -F '  #{window_name} [#{pane_current_command}]' 2>/dev/null
+    }
+    ;;
+attach)
+    j=$(running_job); [ -n "$j" ] || { echo "no running $DEVBOX_JOB_NAME job"; exit 1; }
+    # --overlap is required, or the step blocks waiting on the batch step's
+    # resources. `ssh <node>` cannot see the socket where /tmp is job-private.
+    if [ -n "${2:-}" ]; then srun --jobid="$j" --overlap --pty tmux attach -t "claude:agent$2"
+    else srun --jobid="$j" --overlap --pty tmux attach -t claude; fi
+    ;;
+config)
+    echo "cluster     : $DEVBOX_CLUSTER"
+    echo "root        : $DEVBOX_ROOT"
+    echo "slots       : $DEVBOX_SLOTS"
+    echo "name        : $DEVBOX_NAME (tunnel), $DEVBOX_NAME-<slot> (remote control)"
+    echo "state       : $DEVBOX_STATE"
+    echo "submit from : $DEVBOX_SUBMIT_DIR"
+    echo "sbatch flags:"; devbox_sbatch_flags | sed 's/^/  /'
+    echo "preflight   :"; preflight && echo "  ok"
+    ;;
+*)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac

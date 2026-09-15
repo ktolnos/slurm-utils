@@ -453,3 +453,13 @@ if [ "${SLURM_UTILS_AUTO_ACTIVATE:-1}" = 1 ]; then
         return 0
     }
 fi
+
+# ------------------------------------------------------------------------------
+# DEVBOX
+# ------------------------------------------------------------------------------
+# Puts `devbox-up` on the PATH. See devbox/README.md; the cluster is detected
+# from $CC_CLUSTER, so the same checkout works everywhere.
+case ":$PATH:" in
+    *":$HOME/slurm-utils/devbox:"*) ;;
+    *) export PATH="$HOME/slurm-utils/devbox:$PATH" ;;
+esac
