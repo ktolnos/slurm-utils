@@ -180,6 +180,20 @@ The root is implicit; the default list is `$HOME` alone, and an agent that canno
 read its own repo is useless. `devbox-up config` does not print it — check the
 `add-dir:` line in the job log, or the dry run at the end of this file.
 
+## 7b. Point at the active project
+
+```bash
+active-project ~/the-repo-being-worked-on
+active-project                     # verify
+```
+
+The root is not the work (trust and history pin it), and `/clear` starts a
+conversation that remembers nothing — so without this, every clear means telling
+each slot again where the code is. A `SessionStart` hook injects the pointer into
+each new conversation and `devbox.sh` passes it to `--add-dir`. Skip it if you
+genuinely do not know yet; sessions then start with no project line rather than a
+wrong one, and `active-project <dir>` can be set at any time.
+
 ## 8. Launch
 
 ```bash

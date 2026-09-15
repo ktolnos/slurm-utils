@@ -46,6 +46,18 @@ first step's resources. `srun --jobid=<id> --overlap` is also the only way into
 the dev box's tmux where `/tmp` is job-private; `ssh <node>` cannot see the
 socket. `devbox-up attach [slot]` does this for you.
 
+## The session root is not the project
+
+This session's root holds the devbox's own docs and config. The work is
+elsewhere, and the path is injected into every session (including after each
+`/clear`) as an `Active project:` line — `active-project` prints it, `project`
+cds to it. Read and edit code there, not in the root.
+
+The root is what it is because workspace trust and conversation history are
+keyed to it, not because anyone thinks the work lives there. If the user starts
+on a different project, run `active-project <dir>` so the next session and the
+other slots agree.
+
 ## You are not the only agent here
 
 Several agent slots share one devbox and one source tree, and any of them may

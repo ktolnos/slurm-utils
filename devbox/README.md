@@ -20,11 +20,12 @@ devbox-up config     # resolved config + the exact sbatch flags
 | `devbox.sh` | the job: tmux session, agent slots, tunnel, watchdog |
 | `devbox-up` | submit / status / attach / restart / stop, with preflight |
 | `pin-session` | `SessionStart` hook that keeps each slot's uuid honest |
+| `active-project` | the active project pointer, and the hook that tells sessions about it |
 | `SETUP_INSTRUCTIONS.md` | step-by-step for a new cluster, written for an agent |
 | `AGENTS.shared.md` | portable cluster rules, imported by each cluster's `AGENTS.md` |
 | `AGENTS.template.md` | skeleton for a new cluster's `AGENTS.md`, with the blanks marked |
 | `clusters/<cluster>/AGENTS.md` | that cluster's real rules, **symlinked** into its session root |
-| `settings.json` | the pin hook, symlinked into every root's `.claude/` |
+| `settings.json` | both `SessionStart` hooks, symlinked into every root's `.claude/` |
 
 Defaults: root `~/devbox` with `--add-dir $HOME`, tunnel `<cluster>-dev`,
 3 slots, 2 cores / 6 GB / no GPU, 3-day walltime, account from
@@ -83,6 +84,44 @@ the root and the `--add-dir` list. Everything below marked
   file in `$HOME`. If a site shares `$HOME` between clusters, a shared pin would
   have two clusters resuming one conversation -- two agents on one conversation
   corrupts it.
+
+## The active project
+
+The session root cannot be the project you are working on: it is fixed by
+workspace trust and by conversation history being keyed to an absolute path. So
+the agents live in `~/devbox` while the work lives somewhere else — and because
+`/clear` starts a conversation with no memory of the last one, every clear used
+to mean telling each slot again where the work is.
+
+One pointer fixes that, per cluster:
+
+```bash
+active-project ~/my-repo     # set it
+active-project               # print it
+project                      # shell helper: cd there (or `project <dir>` to set)
+```
+
+It is read, not inherited, at three points:
+
+- **A `SessionStart` hook** injects it into every new conversation, including
+  each `/clear`, via `additionalContext`. This is the part that matters: the
+  environment of an already-running agent process cannot change, but a hook is
+  re-read every single time a session starts.
+- **`devbox.sh` adds it to `--add-dir`** when launching each slot, so an agent
+  can actually read the tree it has just been told to work in.
+- **`devbox-up status`** prints it, and the job log has a `project:` line.
+
+Stored in `$DEVBOX_STATE/active-project` (so `~/.devbox/<cluster>/`), because
+what you have in flight on one cluster has nothing to do with another's.
+`$DEVBOX_PROJECT` overrides the file for one command or one shell — but nothing
+exports it, deliberately: `slurm_utils.sh` is sourced by `~/.bashrc`, which
+`devbox.sh` also sources, so an exported value would be inherited by every
+agent and frozen at launch, and the stale environment would then beat the file
+the hook reads.
+
+A pointer at a directory that no longer exists is reported as such rather than
+passed over in silence — a stale pointer does its damage precisely when nobody
+notices it.
 
 ## The three slots
 

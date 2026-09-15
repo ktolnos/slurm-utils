@@ -120,12 +120,18 @@ start_tmux() {
 # survives the trip through tmux send-keys, and skipped when absent so a
 # cluster's stanza can name a tree that only some nodes mount.
 ADD_DIRS=""
-for d in $DEVBOX_ADD_DIRS; do
+# The active project comes along automatically: it is where the work is, and an
+# agent that cannot read it is useless. Harmless when it already sits inside one
+# of the configured trees -- the loop below skips duplicates and missing paths.
+ACTIVE_PROJECT="$("$DEVBOX_DIR/active-project" 2>/dev/null)"
+for d in $DEVBOX_ADD_DIRS $ACTIVE_PROJECT; do
     [ "$d" = "$REPO" ] && continue          # the root is already implicit
     [ -d "$d" ] || { echo "add-dir: skipping $d (not a directory)"; continue; }
+    case "$ADD_DIRS" in *"--add-dir '$d'"*) continue ;; esac   # named twice
     ADD_DIRS="$ADD_DIRS --add-dir '$d'"
 done
 echo "    add-dir:$ADD_DIRS"
+echo "    project:${ACTIVE_PROJECT:- (none set -- run 'active-project <dir>')}"
 
 declare -A LAST_LAUNCH
 launch_agent() {

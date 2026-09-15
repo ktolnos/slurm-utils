@@ -1,0 +1,87 @@
+#!/bin/bash
+# The active project: one file saying which tree the agents should be working
+# in, and a SessionStart hook that tells every new conversation about it.
+#
+# Why this exists: the session root (~/devbox) is fixed by workspace trust and
+# by history being keyed on an absolute path, so it cannot be the project you
+# are working on. That left the agents rooted somewhere that is not the work,
+# and every /clear meant telling each slot again where the work actually is --
+# /clear starts a fresh conversation with no memory of the last one.
+#
+#   active-project                 print the active project path
+#   active-project <dir>           set it
+#   active-project --clear         unset it
+#   active-project --hook          emit SessionStart JSON (used by the hook)
+#
+# The value lives in $DEVBOX_STATE/active-project, per cluster, because the work
+# in flight on one cluster has nothing to do with another's. $DEVBOX_PROJECT
+# overrides it for one command or one shell.
+
+DEVBOX_DIR="${DEVBOX_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+if [ -f "$DEVBOX_DIR/config.sh" ]; then
+    # shellcheck source=config.sh
+    source "$DEVBOX_DIR/config.sh" >/dev/null 2>&1
+fi
+STATE="${DEVBOX_STATE:-$HOME/.devbox/${DEVBOX_CLUSTER:-unknown}}"
+FILE="$STATE/active-project"
+
+read_project() {
+    # An explicit override wins, so a single command or shell can point
+    # somewhere else without disturbing what every other session sees.
+    if [ -n "${DEVBOX_PROJECT:-}" ]; then printf '%s\n' "$DEVBOX_PROJECT"; return 0; fi
+    [ -s "$FILE" ] || return 1
+    local p; p=$(head -1 "$FILE")
+    [ -n "$p" ] || return 1
+    printf '%s\n' "$p"
+}
+
+case "${1:-show}" in
+--hook)
+    # Injected into the context of every session started in this root,
+    # including each /clear -- which is the whole point: the env of the
+    # already-running process cannot change, but this is re-read every time.
+    # Silent when nothing is set: a hook that prints noise on every session
+    # start gets ignored, and an empty value is not worth a line.
+    p=$(read_project) || exit 0
+    [ -d "$p" ] || {
+        # Still report it: a project that has moved or been deleted is exactly
+        # when a stale pointer does damage, and saying so beats saying nothing.
+        printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
+            "$(python3 -c 'import json,sys; print(json.dumps("The active project is recorded as "+sys.argv[1]+", but that directory does not exist. Ask which project to work in, and update it with `active-project <dir>`."))' "$p")"
+        exit 0
+    }
+    python3 - "$p" <<'PY'
+import json, sys
+p = sys.argv[1]
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+ "additionalContext":
+   f"Active project: {p}\n"
+   "That is where the work is. Unless the user says otherwise, read and edit "
+   "code there rather than in this session's root, which holds only the "
+   "devbox's own docs and config. The root is what it is because workspace "
+   "trust and conversation history are keyed to it, not because the work "
+   "lives there.\n"
+   "If the user starts talking about a different project, update the pointer "
+   "with `active-project <dir>` so the next session and the other slots agree."}}))
+PY
+    ;;
+--clear)
+    rm -f "$FILE"; echo "active project cleared ($FILE)"
+    ;;
+show|"")
+    p=$(read_project) || { echo "no active project set; use: active-project <dir>" >&2; exit 1; }
+    printf '%s\n' "$p"
+    [ -d "$p" ] || echo "warning: that directory does not exist" >&2
+    ;;
+*)
+    dir=$1
+    [ -d "$dir" ] || { echo "not a directory: $dir" >&2; exit 1; }
+    # Store it absolute and symlink-resolved: the value is read by other
+    # sessions, other slots and the next job, none of which share this cwd.
+    dir=$(cd "$dir" && pwd -P) || exit 1
+    mkdir -p "$STATE"
+    printf '%s\n' "$dir" > "$FILE"
+    echo "active project: $dir"
+    echo "(new sessions and each /clear pick this up; already-running ones need a /clear)"
+    ;;
+esac

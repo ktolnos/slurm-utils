@@ -508,3 +508,22 @@ _slurm_utils_update_notice() {
     printf 'git -C ~/slurm-utils pull && devbox-up restart\n'
 }
 _slurm_utils_update_notice
+
+# `project` -- jump to the active project (see devbox/active-project).
+#   project            cd to it
+#   project <dir>      make <dir> the active project
+#
+# Deliberately NOT `export DEVBOX_PROJECT=...` here. slurm_utils.sh is sourced
+# by ~/.bashrc, which devbox.sh also sources, so an exported value would be
+# inherited by every agent and frozen at launch -- and active-project treats
+# $DEVBOX_PROJECT as an override, so the stale env would beat the file the
+# SessionStart hook reads. Keep that variable for a deliberate one-off override.
+project() {
+    if [ $# -gt 0 ]; then "$HOME/slurm-utils/devbox/active-project" "$1"; return; fi
+    local p
+    p=$("$HOME/slurm-utils/devbox/active-project") || return 1
+    # Plain `cd`, not `builtin cd`: the cd override is what activates the venv,
+    # and that is wanted here. Its exit status is activate's, so never chain.
+    cd "$p"
+    return 0
+}
