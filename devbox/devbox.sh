@@ -82,6 +82,17 @@ start_tmux() {
     return 1
 }
 
+# --add-dir flags, built once. Quoted per directory so a path with a space
+# survives the trip through tmux send-keys, and skipped when absent so a
+# cluster's stanza can name a tree that only some nodes mount.
+ADD_DIRS=""
+for d in $DEVBOX_ADD_DIRS; do
+    [ "$d" = "$REPO" ] && continue          # the root is already implicit
+    [ -d "$d" ] || { echo "add-dir: skipping $d (not a directory)"; continue; }
+    ADD_DIRS="$ADD_DIRS --add-dir '$d'"
+done
+echo "    add-dir:$ADD_DIRS"
+
 declare -A LAST_LAUNCH
 launch_agent() {
     local slot=$1 win="agent$1" arg
@@ -94,7 +105,7 @@ launch_agent() {
     # DEVBOX_SLOT/DEVBOX_STATE tell the SessionStart pin hook which slot file to
     # update when /clear or /resume changes the conversation id underneath us.
     tmux send-keys -t "claude:$win" \
-        "cd '$REPO'; DEVBOX_SLOT=$slot DEVBOX_STATE='$DEVBOX_STATE' '$DEVBOX_CLAUDE_BIN' --remote-control $DEVBOX_NAME-$slot $arg --add-dir '$HOME' --autocompact $DEVBOX_AUTOCOMPACT" C-m
+        "cd '$REPO'; DEVBOX_SLOT=$slot DEVBOX_STATE='$DEVBOX_STATE' '$DEVBOX_CLAUDE_BIN' --remote-control $DEVBOX_NAME-$slot $arg$ADD_DIRS --autocompact $DEVBOX_AUTOCOMPACT" C-m
     LAST_LAUNCH[$slot]=$SECONDS
     echo "slot $slot: $DEVBOX_NAME-$slot  $arg"
 }

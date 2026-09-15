@@ -23,11 +23,24 @@ devbox-up config     # resolved config + the exact sbatch flags
 | `SETUP_INSTRUCTIONS.md` | step-by-step for a new cluster, written for an agent |
 | `AGENTS.shared.md` | portable cluster rules, imported by each cluster's `AGENTS.md` |
 | `AGENTS.template.md` | skeleton for a new cluster's `AGENTS.md`, with the blanks marked |
+| `clusters/<cluster>/AGENTS.md` | that cluster's real rules, **symlinked** into its session root |
+| `settings.json` | the pin hook, symlinked into every root's `.claude/` |
 
 Defaults: root `~/devbox` with `--add-dir $HOME`, tunnel `<cluster>-dev`,
 3 slots, 2 cores / 6 GB / no GPU, 3-day walltime, account from
 `$SBATCH_ACCOUNT`. Override any of them from the environment
-(`DEVBOX_SLOTS="1 2" devbox-up`) or in `config.sh`.
+(`DEVBOX_SLOTS="1 2" devbox-up`) or in `config.sh`, whose per-cluster `case`
+runs before the defaults — precedence is `environment > stanza > default`.
+
+Where the work is **not** under `$HOME` — repos on `/project`, outputs on
+`/scratch` — set `DEVBOX_ADD_DIRS` to the trees the agents need. The root is
+implicit and the default list is `$HOME` alone, so an otherwise healthy box
+comes up with agents that cannot read the repo they exist to work on.
+
+The root does not have to be `~/devbox`. Pointing `DEVBOX_ROOT` at a project
+repo you already trust skips the interactive trust step entirely and keeps any
+pre-devbox conversation resumable — at the cost of two symlinks inside that
+repo, which is what `.gitignore` is for. Killarney's stanza does exactly this.
 
 ## Porting to a new cluster
 
@@ -45,14 +58,17 @@ built in one function. In practice:
 3. `mkdir ~/devbox`, then **run `claude` there once, interactively, and accept
    the trust dialog.** This is the one step that cannot be automated -- see the
    home-trust section -- and `devbox-up` refuses to submit without it.
-4. Install the pin hook in `~/devbox/.claude/settings.json` (see `pin-session`).
-5. Copy `AGENTS.template.md` to `~/devbox/AGENTS.md` and fill in its TODOs; the
-   portable rules arrive by importing `AGENTS.shared.md`.
+4. Symlink the pin hook: `<root>/.claude/settings.json` -> `devbox/settings.json`.
+5. Fill in `clusters/<cluster>/AGENTS.md` from `AGENTS.template.md` and symlink
+   it to `<root>/AGENTS.md`; the portable rules arrive by importing
+   `AGENTS.shared.md` through an **absolute** `@~/slurm-utils/...` path, which a
+   file read through a symlink needs.
 6. `devbox-up config` to see what it resolved, then `devbox-up`.
 
 Add a stanza to the `case` in `config.sh` only for what a cluster genuinely
-gets wrong. From two clusters so far that is: the account, the walltime, and
-whether `sbatch` is allowed from `/home`. Everything below marked
+gets wrong. From two clusters so far that is: the account, the walltime,
+whether `sbatch` is allowed from `/home`, and — where work lives off `$HOME` —
+the root and the `--add-dir` list. Everything below marked
 **fir-specific** is a note, not a dependency.
 
 ## What is NOT portable, and why

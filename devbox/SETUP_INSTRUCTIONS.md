@@ -117,18 +117,18 @@ devbox-up config | tail -3        # preflight must say "ok"
 
 ## 6. Install the pin hook
 
+Symlink the shared one; don't write a second copy:
+
 ```bash
-mkdir -p ~/devbox/.claude
-cat > ~/devbox/.claude/settings.json <<'EOF'
-{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "$HOME/slurm-utils/devbox/pin-session" } ] }
-    ]
-  }
-}
-EOF
+ROOT=$(devbox-up config | awk '/^root/{print $3}')
+mkdir -p "$ROOT/.claude"
+ln -sfn ~/slurm-utils/devbox/settings.json "$ROOT/.claude/settings.json"
+python3 -m json.tool "$ROOT/.claude/settings.json" >/dev/null && echo ok
 ```
+
+If that root needs Claude Code settings of its own, put them in
+`.claude/settings.local.json` next to the symlink — Claude Code merges it over
+the shared file, so the two do not fight.
 
 Without this, `/clear` in a slot silently orphans that slot's conversation: it
 mints a new conversation id inside the same process, the pinned id goes stale,
@@ -142,11 +142,36 @@ routing around it.
 
 ## 7. Install `AGENTS.md`
 
-See `AGENTS.template.md` in this directory: copy it to `~/devbox/AGENTS.md`,
-add a one-line `~/devbox/CLAUDE.md` that imports it, and fill in the TODOs. The
-portable rules come from `AGENTS.shared.md` via an import, so only
-cluster-specific facts go in the copy — and leave a TODO rather than guessing a
-number you have not measured.
+The cluster's rules live in git under `clusters/<cluster>/AGENTS.md` and are
+**symlinked** into the root — a copy in the root drifts from the repo silently.
+
+```bash
+mkdir -p ~/slurm-utils/devbox/clusters/$CC_CLUSTER
+cp ~/slurm-utils/devbox/AGENTS.template.md ~/slurm-utils/devbox/clusters/$CC_CLUSTER/AGENTS.md
+# fill in the TODOs, then:
+ln -sfn ~/slurm-utils/devbox/clusters/$CC_CLUSTER/AGENTS.md "$ROOT/AGENTS.md"
+echo '@AGENTS.md' > "$ROOT/CLAUDE.md"    # or add that line to an existing CLAUDE.md
+```
+
+Import the portable rules with the **absolute** path
+`@~/slurm-utils/devbox/AGENTS.shared.md`, not a relative one: the file is read
+through a symlink, so a relative import resolves against the wrong directory.
+Leave a TODO rather than guessing a number you have not measured.
+
+Where the root is an existing project repo, git-ignore the two symlinks — they
+point into `$HOME` and mean nothing in a fresh clone:
+
+```
+/AGENTS.md
+/.claude/settings.json
+.claude/settings.local.json
+```
+
+**If the work is not under `$HOME`,** set `DEVBOX_ADD_DIRS` in this cluster's
+`config.sh` stanza to the trees the agents need (`"$HOME /scratch/$USER"`, say).
+The root is implicit; the default list is `$HOME` alone, and an agent that cannot
+read its own repo is useless. `devbox-up config` does not print it — check the
+`add-dir:` line in the job log, or the dry run at the end of this file.
 
 ## 8. Launch
 
@@ -166,8 +191,11 @@ Remote Control as `<cluster>-dev-1`, `-2`, `-3`.
 ## 9. Record what you learned
 
 If this cluster needed anything the defaults got wrong, add a stanza to the
-`case` in `config.sh` — account, walltime, `DEVBOX_SUBMIT_DIR`, a partition —
-and keep it to values, not logic. If you discover something true of *every*
+`case` in `config.sh` — account, walltime, `DEVBOX_SUBMIT_DIR`, `DEVBOX_ROOT`,
+`DEVBOX_ADD_DIRS`, a partition — and keep it to values, not logic. The `case`
+runs **before** the portable defaults, so precedence is
+`environment > stanza > default`; write every assignment as `${VAR:-...}` or you
+break the environment override. If you discover something true of *every*
 cluster, put it in `AGENTS.shared.md` so the other clusters get it too.
 
 Commit and push both, or the next cluster starts from where you did.
@@ -208,3 +236,29 @@ Things that have wasted time before, worth knowing up front:
   CLI runs fine, but its remote-control daemon dies on
   `401 refresh_token_invalidated`. It was tried and removed; don't re-add it to
   the job. Use the VS Code Codex extension over the tunnel instead.
+
+---
+
+## Dry run: what will each slot actually execute?
+
+Worth doing before the first submit — it resolves the root, the `--add-dir`
+list and each slot's `--resume` / `--session-id` without launching anything.
+
+```bash
+set -u; source ~/slurm-utils/devbox/config.sh
+REPO="$DEVBOX_ROOT"
+HIST="$HOME/.claude/projects/$(echo "$REPO" | sed 's/[^A-Za-z0-9]/-/g')"
+ADD=""; for d in $DEVBOX_ADD_DIRS; do [ "$d" = "$REPO" ] && continue
+  [ -d "$d" ] && ADD="$ADD --add-dir '$d'" || echo "skip $d"; done
+echo "root:$REPO"; echo "add :$ADD"
+for s in $DEVBOX_SLOTS; do id=$(cat "$DEVBOX_STATE/session-id-$s" 2>/dev/null)
+  if [ -z "$id" ]; then a="--session-id <minted>"
+  elif [ -f "$HIST/$id.jsonl" ]; then a="--resume $id"
+  else a="--session-id $id"; fi
+  echo "slot $s: $DEVBOX_NAME-$s $a$ADD"; done
+```
+
+A slot showing `--session-id` for an id you expected to resume means its history
+is not under **this** root — the root moved, and that conversation is stranded
+(history is keyed by the root's absolute path). Either point the root back, or
+clear that slot's id file and let it mint a fresh one.

@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "$HOME/slurm-utils/devbox/pin-session" } ] }
+    ]
+  }
+}

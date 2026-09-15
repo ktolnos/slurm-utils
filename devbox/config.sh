@@ -28,7 +28,53 @@ devbox_cluster() {
 DEVBOX_CLUSTER="$(devbox_cluster)"
 [ -n "$DEVBOX_CLUSTER" ] || { echo "config.sh: could not determine the cluster name; set DEVBOX_CLUSTER" >&2; return 1 2>/dev/null || exit 1; }
 
-# --- portable defaults --------------------------------------------------------
+# --- per-cluster overrides ----------------------------------------------------
+# Runs BEFORE the portable defaults below, so precedence is
+#   environment  >  this stanza  >  portable default
+# and every assignment here must be ${VAR:-...} to keep the environment on top.
+# It used to run after, which meant a stanza could only ever set a value the
+# defaults had left empty: DEVBOX_ROOT and DEVBOX_ADD_DIRS were already non-empty
+# by then, so `DEVBOX_ROOT="${DEVBOX_ROOT:-/some/path}"` silently did nothing and
+# the box came up rooted at the default.
+#
+# Add a stanza when a cluster needs something the defaults get wrong.
+# Keep it to the few things that genuinely differ -- if you find yourself adding
+# logic here, it probably belongs in devbox.sh guarded by a capability test
+# instead of a cluster name.
+case "$DEVBOX_CLUSTER" in
+    fir)
+        # Account arrives via SBATCH_ACCOUNT (def-gigor). Slurm resolves the
+        # _cpu/_gpu suffix itself, and the partition routes on --time, so
+        # nothing to set. sbatch from /home works here.
+        :
+        ;;
+    killarney)
+        # sbatch is rejected from /home on this cluster: the check is on the
+        # submitting *directory*, not on where the script lives, so submitting
+        # from scratch with the script still in ~/slurm-utils works (verified
+        # 2026-09-15 with --test-only from both).
+        DEVBOX_SUBMIT_DIR="${DEVBOX_SUBMIT_DIR:-${SCRATCH:-$HOME}}"
+        # No SBATCH_ACCOUNT in the environment here, and Killarney does not
+        # resolve a default, so the account has to be named.
+        DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-aip-gigor}"
+        # Home is 50 GB here and holds no work, so the root is the project repo
+        # itself -- which is already trust-accepted, so there is no interactive
+        # step, and the pre-devbox single-agent conversation stays resumable
+        # (history is keyed by the root's absolute path, so a root move would
+        # strand it). $HOME and $SCRATCH come in via --add-dir.
+        DEVBOX_ROOT="${DEVBOX_ROOT:-/project/6101830/eop/unlearning-reward-hacking}"
+        DEVBOX_ADD_DIRS="${DEVBOX_ADD_DIRS:-$HOME ${SCRATCH:-/scratch/$USER}}"
+        ;;
+    *)
+        # Unknown cluster: the defaults are the portable ones. If the first
+        # `devbox-up` fails, the flag it rejects is the thing to add above.
+        :
+        ;;
+esac
+
+
+# --- portable defaults (filled in only where neither the environment nor the
+# cluster stanza above set a value) --------------------------------------------------------
 DEVBOX_JOB_NAME="${DEVBOX_JOB_NAME:-claude-dev}"
 DEVBOX_SLOTS="${DEVBOX_SLOTS:-1 2 3}"   # one Claude session per slot; add a 4 for a fourth
 DEVBOX_CPUS="${DEVBOX_CPUS:-2}"
@@ -41,6 +87,14 @@ DEVBOX_AUTOCOMPACT="${DEVBOX_AUTOCOMPACT:-500k}"
 # hop, forever. This must be a real project directory you have accepted the
 # trust dialog in once. $HOME comes in via --add-dir instead.
 DEVBOX_ROOT="${DEVBOX_ROOT:-$HOME/devbox}"
+
+# Extra directories each agent gets via --add-dir, space separated. The root is
+# implicit; this is for the trees that live outside it. $HOME is the default
+# because that is where work sits on a cluster with a roomy home -- but on a
+# site where the repos are in /project and the outputs in /scratch, neither is
+# reachable from a $HOME-only list, and an agent that cannot read its own repo
+# is useless. A directory that does not exist is skipped rather than passed.
+DEVBOX_ADD_DIRS="${DEVBOX_ADD_DIRS:-$HOME}"
 
 # Names: `<cluster>-dev` for the tunnel, `<cluster>-dev-<slot>` for Remote
 # Control. Deriving them from the cluster is what makes several clusters usable
@@ -63,29 +117,6 @@ DEVBOX_SUBMIT_DIR="${DEVBOX_SUBMIT_DIR:-$HOME}"
 DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-${SBATCH_ACCOUNT:-}}"
 DEVBOX_PARTITION="${DEVBOX_PARTITION:-}"
 DEVBOX_EXTRA_SBATCH="${DEVBOX_EXTRA_SBATCH:-}"
-
-# --- per-cluster overrides ----------------------------------------------------
-# Add a stanza when a cluster needs something the defaults above get wrong.
-# Keep it to the few things that genuinely differ -- if you find yourself adding
-# logic here, it probably belongs in devbox.sh guarded by a capability test
-# instead of a cluster name.
-case "$DEVBOX_CLUSTER" in
-    fir)
-        # Account arrives via SBATCH_ACCOUNT (def-gigor). Slurm resolves the
-        # _cpu/_gpu suffix itself, and the partition routes on --time, so
-        # nothing to set. sbatch from /home works here.
-        :
-        ;;
-    # killarney)
-    #     # sbatch is rejected from /home on this cluster -- submit from scratch.
-    #     DEVBOX_SUBMIT_DIR="${SCRATCH:-$HOME}"
-    #     ;;
-    *)
-        # Unknown cluster: the defaults are the portable ones. If the first
-        # `devbox-up` fails, the flag it rejects is the thing to add above.
-        :
-        ;;
-esac
 
 # --- sbatch flags -------------------------------------------------------------
 # Printed one per line so callers can read them into an array and keep quoting
