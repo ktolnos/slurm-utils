@@ -410,8 +410,46 @@ psbt() {
     sbt "$@"
 }          
 
-alias pip='if command -v uv &> /dev/null; then uv pip; else python -m pip; fi'
-alias activate='source venv/bin/activate &> /dev/null; source .venv/bin/activate &> /dev/null' # tries to activate a virtual environment inside current folder
-function cd { # activates virtual environment after changing directory
-    builtin cd "$@"; activate
+# pip -> uv pip when uv is available.
+# A function, not an alias: as an alias this expanded in place, so `pip install x`
+# became `if ...; fi install x` -- a syntax error on every invocation with an
+# argument.
+pip() {
+    if command -v uv > /dev/null 2>&1; then
+        uv pip "$@"
+    else
+        python -m pip "$@"
+    fi
 }
+
+# Activate a virtual environment (.venv, or legacy venv) in a directory.
+# A function, not an alias: aliases are not expanded in non-interactive shells,
+# so in scripts and sbatch/srun jobs `activate` instead resolved to the
+# `activate` script that an active venv puts on PATH and *executed* it, which
+# prints "You must source this script" to stderr and returns non-zero.
+# Returns 0 only if something was actually activated, so `activate && cmd` works.
+activate() {
+    local dir="${1:-$PWD}" venv
+    for venv in "$dir/.venv" "$dir/venv"; do
+        if [ -f "$venv/bin/activate" ]; then
+            . "$venv/bin/activate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# cd, then activate a venv if the new directory has one.
+# On by default, as before. Opt out with `export SLURM_UTILS_AUTO_ACTIVATE=0`
+# before sourcing this file -- worth doing where the repos are uv projects, since
+# uv resolves their environment without activation.
+if [ "${SLURM_UTILS_AUTO_ACTIVATE:-1}" = 1 ]; then
+    cd() {
+        # Preserve cd's own exit status. The previous version returned
+        # `activate`'s status instead, which is non-zero in any directory
+        # without a venv -- so `cd dir && cmd` silently skipped cmd.
+        builtin cd "$@" || return $?
+        activate
+        return 0
+    }
+fi
