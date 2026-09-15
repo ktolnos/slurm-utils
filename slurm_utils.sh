@@ -463,3 +463,48 @@ case ":$PATH:" in
     *":$HOME/slurm-utils/devbox:"*) ;;
     *) export PATH="$HOME/slurm-utils/devbox:$PATH" ;;
 esac
+
+# ------------------------------------------------------------------------------
+# UPDATE NOTICE
+# ------------------------------------------------------------------------------
+# Tell an interactive shell when this checkout is behind origin, and print the
+# update command on its own line so it can be copy-pasted.
+#
+# It only ever *reports*. Nothing here pulls, and that is deliberate: this repo
+# ships devbox.sh AND AGENTS.shared.md, so it feeds both the job scripts and the
+# instructions the auto-mode agents read. An unattended pull would turn GitHub
+# write access into code execution and prompt injection on every cluster at
+# once, and would propagate a bad commit to the very box you would use to fix it.
+#
+# Costs nothing at shell start: the comparison is against the origin/main ref
+# already on disk, with no network call, so it is silent and instant when GitHub
+# is slow or the node is off-network. A detached fetch refreshes that ref at most
+# once an hour, so the notice is at worst an hour stale.
+#
+# Opt out with `export SLURM_UTILS_UPDATE_CHECK=0` before sourcing this file.
+_slurm_utils_update_notice() {
+    [ "${SLURM_UTILS_UPDATE_CHECK:-1}" = 1 ] || return 0
+    # Interactive only, and checked here rather than in .bashrc: this file is
+    # sourced ABOVE .bashrc's own interactive guard, so srun steps and every
+    # devbox.sh job start (it sources .bashrc) reach this code too.
+    case $- in *i*) ;; *) return 0 ;; esac
+    local dir="${SLURM_UTILS_DIR:-$HOME/slurm-utils}"
+    [ -d "$dir/.git" ] || return 0
+
+    # Throttled refresh, detached so it never delays the prompt. The stamp is
+    # touched BEFORE forking, so a burst of new shells -- tmux windows, a flurry
+    # of srun steps -- cannot each spawn their own fetch.
+    local stamp="${TMPDIR:-/tmp}/.slurm-utils-fetch-$(id -u)"
+    if [ -z "$(find "$stamp" -mmin -60 2>/dev/null)" ]; then
+        : > "$stamp" 2>/dev/null
+        ( git -C "$dir" fetch --quiet origin main >/dev/null 2>&1 & ) >/dev/null 2>&1
+    fi
+
+    local behind
+    behind=$(git -C "$dir" rev-list --count HEAD..origin/main 2>/dev/null) || return 0
+    case "$behind" in ''|0|*[!0-9]*) return 0 ;; esac   # in sync, ahead, or no ref yet
+
+    printf '\033[33m⚠ slurm-utils is %s commit(s) behind origin/main\033[0m — pull, then restart to apply:\n' "$behind"
+    printf 'git -C ~/slurm-utils pull && devbox-up restart\n'
+}
+_slurm_utils_update_notice
