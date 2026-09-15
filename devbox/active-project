@@ -50,19 +50,15 @@ case "${1:-show}" in
             "$(python3 -c 'import json,sys; print(json.dumps("The active project is recorded as "+sys.argv[1]+", but that directory does not exist. Ask which project to work in, and update it with `active-project <dir>`."))' "$p")"
         exit 0
     }
+    # Kept to one line on purpose. This rides along on every request of every
+    # session for the life of the conversation, and AGENTS.shared.md already
+    # explains why the root is not the project -- repeating it here would be
+    # paying for the same words twice. ~25 tokens instead of ~122.
     python3 - "$p" <<'PY'
 import json, sys
-p = sys.argv[1]
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
- "additionalContext":
-   f"Active project: {p}\n"
-   "That is where the work is. Unless the user says otherwise, read and edit "
-   "code there rather than in this session's root, which holds only the "
-   "devbox's own docs and config. The root is what it is because workspace "
-   "trust and conversation history are keyed to it, not because the work "
-   "lives there.\n"
-   "If the user starts talking about a different project, update the pointer "
-   "with `active-project <dir>` so the next session and the other slots agree."}}))
+ "additionalContext": f"Active project: {sys.argv[1]} -- work there, not in the "
+                      "session root. Repoint with `active-project <dir>`."}}))
 PY
     ;;
 --clear)

@@ -187,6 +187,19 @@ active-project ~/the-repo-being-worked-on
 active-project                     # verify
 ```
 
+Optionally make the shell follow the same pointer, so there is one source of
+truth rather than a path hardcoded in `~/.bashrc` too:
+
+```bash
+__devbox_project=$("$HOME/slurm-utils/devbox/active-project" 2>/dev/null)
+[ -d "${__devbox_project:-}" ] && cd "$__devbox_project"
+unset __devbox_project
+```
+
+Test the directory, then `cd` — never `cd "$p" || cd ~`. Where `.bashrc`
+overrides `cd`, the override returns the *other* command's status, so a fallback
+chained on `cd` fires even when the `cd` succeeded.
+
 The root is not the work (trust and history pin it), and `/clear` starts a
 conversation that remembers nothing — so without this, every clear means telling
 each slot again where the code is. A `SessionStart` hook injects the pointer into

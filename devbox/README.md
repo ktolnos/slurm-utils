@@ -123,6 +123,15 @@ A pointer at a directory that no longer exists is reported as such rather than
 passed over in silence — a stale pointer does its damage precisely when nobody
 notices it.
 
+**Cost.** The injected line is deliberately one sentence, ~30 tokens, because it
+rides along on every request for the life of the conversation; the reasoning
+behind it lives in `AGENTS.shared.md`, which is loaded anyway, instead of being
+paid for twice. An **idle slot costs nothing at all**: a session that is never
+spoken to makes no model calls, and measured on 2026-09-15 a live session left
+sitting at an empty prompt for 75 s had not even written a transcript file. The
+hook only runs a local script; the text it returns is not billed until you
+actually send something.
+
 ## The three slots
 
 `DEVBOX_SLOTS` in `config.sh` drives everything; add a `4` and you get a fourth
