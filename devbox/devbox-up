@@ -46,7 +46,6 @@ preflight() {
     # Trust is the one thing that cannot be fixed from a batch job: a root whose
     # trust dialog has not been accepted (and persisted) blocks every job in the
     # chain, and $HOME can never persist it.
-    local key; key=$(printf '%s' "$DEVBOX_ROOT" | sed 's/[^A-Za-z0-9]/-/g')
     if [ "$DEVBOX_ROOT" = "$HOME" ]; then
         echo "  FATAL: DEVBOX_ROOT must not be \$HOME -- home trust is session-only and never persists"; bad=1
     elif [ -f "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
