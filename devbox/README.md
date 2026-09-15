@@ -345,6 +345,54 @@ ls -t ~/.claude/projects/-home-eop-devbox/*.jsonl | head -1 \
   | xargs -n1 basename | sed 's/\.jsonl$//' > ~/.devbox/$CC_CLUSTER/session-id-1
 ```
 
+## Two things that bit the first real run of `devbox.sh`
+
+Killarney job 5466901 was the first job to actually run the *ported* script --
+every earlier green run, on either cluster, was still the pre-port
+`~/claude-dev.sh`. Both traps below are portable: neither is a property of
+Killarney, and both would have hit fir on its first `devbox-up` too.
+
+### `sbatch` runs a *copy*, so `$BASH_SOURCE` does not find `config.sh`
+
+Slurm stages the batch script into the node's spool directory and executes that,
+so inside a job `${BASH_SOURCE[0]}` is
+`/cm/local/apps/slurm/var/spool/job<id>/slurm_script` -- and `config.sh` is not
+next to it. `source` failed, and because nothing checked, the script ran on with
+**every `DEVBOX_*` variable empty**: no slots, no `--add-dir`, no tunnel, a
+`mkdir ''`, and a successor `sbatch` that could not open its own script, which
+silently broke the chain as well. One line in the log, then 20 minutes of
+looking healthy.
+
+`devbox-up` now exports `DEVBOX_DIR` at submit time (it rides the chain on
+sbatch's default `--export=ALL`, and the job re-exports it for its successor),
+with `scontrol show job $SLURM_JOB_ID`'s `Command=` as the fallback for a job
+submitted some other way -- a site defaulting to `--export=NONE` still resolves.
+`$BASH_SOURCE` remains only for a direct `bash devbox.sh`. If none of the three
+find `config.sh` the job now exits 1 with a FATAL instead of coming up empty.
+
+### Submitting from inside tmux exports `$TMUX`, and tmux then never starts a server
+
+Every shell in a tmux pane has `$TMUX` set, and `sbatch` exports the submitting
+environment wholesale -- so restarting the devbox *from inside the devbox* hands
+the job a socket path belonging to the old node. A tmux client that sees `$TMUX`
+believes a server is already there and reuses that path instead of creating it,
+so on a fresh node where `/tmp/tmux-$UID` does not exist yet, every
+`new-session` dies with
+
+```
+error creating /tmp/tmux-3146987/default (No such file or directory)
+```
+
+and still exits 0 -- which is why `start_tmux` confirms with `has-session`
+rather than trusting an exit status. Measured on kn057: identical command, dir
+absent, fails with `$TMUX` set and succeeds under `env -u TMUX`; `mkdir` the
+directory by hand and the running job's watchdog recovers on its next pass.
+
+It is only fatal when no server exists yet, so `devbox-up status` and `attach`
+are unaffected -- but `--export=ALL` would have handed the same poisoned `$TMUX`
+to every job in the chain, so one restart from a pane breaks the box forever.
+`devbox.sh` and `devbox-up submit` both `unset TMUX TMUX_PANE`.
+
 ## Caveats inherited from Killarney (all still apply)
 
 - **The dev box is not a compute node.** 2 CPU / 6 GB / no GPU. A vLLM import

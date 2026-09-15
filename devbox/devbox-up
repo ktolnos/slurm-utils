@@ -25,6 +25,16 @@ running_job() { jobs_of '%i' -t RUNNING | head -1; }
 submit() {
     mkdir -p "$DEVBOX_STATE" "$DEVBOX_LOG_DIR"
     local flags; mapfile -t flags < <(devbox_sbatch_flags)
+    # sbatch runs a COPY of the script from the node's spool directory, so the
+    # job cannot find config.sh next to $BASH_SOURCE. Export the real location
+    # instead -- the default --export=ALL carries it into the job, and the job
+    # re-exports it so the successor it queues inherits it too.
+    export DEVBOX_DIR
+    # ...and drop $TMUX for the same reason: --export=ALL would otherwise hand a
+    # devbox submitted from inside a tmux pane a socket path that does not exist
+    # on the compute node, and every tmux new-session in the job fails with
+    # "error creating /tmp/tmux-<uid>/default (No such file or directory)".
+    unset TMUX TMUX_PANE
     ( cd "$DEVBOX_SUBMIT_DIR" 2>/dev/null; sbatch "${flags[@]}" --dependency=singleton "$DEVBOX_DIR/devbox.sh" )
 }
 

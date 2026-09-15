@@ -12,9 +12,43 @@
 # a vLLM import alone will exceed the memory cap and get the job OOM-killed,
 # which takes down every agent AND the tunnel at once.
 
-DEVBOX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Where devbox/ actually lives. NOT $BASH_SOURCE: sbatch copies the script into
+# the node's spool directory and runs that copy, so inside a job $BASH_SOURCE is
+# /.../spool/job<id>/slurm_script and config.sh is not next to it. That failed
+# silently -- `source` printed one line and the script carried on with every
+# DEVBOX_* variable empty: no slots, no tunnel, no successor, and a tmux called
+# with empty arguments.
+#
+# devbox-up exports DEVBOX_DIR at submit time and it rides the chain on sbatch's
+# default --export=ALL; scontrol is the fallback for a job submitted some other
+# way, and $BASH_SOURCE for a direct `bash devbox.sh` outside Slurm.
+devbox_dir() {
+    [ -f "${DEVBOX_DIR:-}/config.sh" ] && { printf '%s\n' "$DEVBOX_DIR"; return; }
+    local cmd
+    cmd=$(scontrol show job "${SLURM_JOB_ID:-}" 2>/dev/null \
+          | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -1)
+    [ -n "$cmd" ] && [ -f "$(dirname "$cmd")/config.sh" ] && { dirname "$cmd"; return; }
+    ( cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd )
+}
+DEVBOX_DIR="$(devbox_dir)"
+[ -f "$DEVBOX_DIR/config.sh" ] || {
+    echo "FATAL: config.sh not found in '$DEVBOX_DIR' -- set DEVBOX_DIR to the devbox/ directory" >&2
+    exit 1
+}
+export DEVBOX_DIR          # so the successor this job queues resolves it too
 # shellcheck source=config.sh
 source "$DEVBOX_DIR/config.sh"
+
+# $TMUX is set in every shell inside a tmux pane, and sbatch exports the whole
+# submitting environment, so submitting the devbox from inside the devbox's own
+# tmux carries it into the job. A tmux client that sees $TMUX believes it is
+# already inside a server and tries to reuse that socket path instead of
+# creating one: on a fresh node /tmp/tmux-$UID does not exist yet, tmux never
+# makes it, and every new-session dies with
+#   error creating /tmp/tmux-<uid>/default (No such file or directory)
+# while still exiting 0. Worse, --export=ALL hands the same poisoned $TMUX to
+# the successor, so one submit from inside a pane breaks the entire chain.
+unset TMUX TMUX_PANE
 
 SCRIPT="$DEVBOX_DIR/devbox.sh"
 REPO="$DEVBOX_ROOT"
