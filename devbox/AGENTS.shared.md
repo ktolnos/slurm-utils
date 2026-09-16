@@ -24,11 +24,13 @@ salloc --time=3:00:00 --gpus=<smallest that fits> --cpus-per-task=6 --mem=16G
 srun --jobid=<id> --overlap python -m pytest tests/
 srun --jobid=<id> --overlap python src/train.py
 ```
-
+You can run CPU-only jobs to get more memory or cores.
+Clusters use fairshare, so requesting more than you need lowers your priority
+for the subsequent jobs.
 `--overlap` is required — without it the second `srun` blocks waiting for the
 first step's resources. `srun --jobid=<id> --overlap` is also the only way into
 the dev box's tmux where `/tmp` is job-private; `ssh <node>` cannot see the
-socket. `devbox-up attach [slot]` does this for you.
+socket. `devbox-up attach [slot]` does this for you. 
 
 ## The session root is not the project
 
@@ -53,13 +55,6 @@ have jobs in the queue. This is the normal case, not the exception.
 - Expect concurrent edits in the same checkout. Re-read a file before assuming
   its contents; don't "clean up" work you cannot account for.
 
-## One source tree
-
-Work lives in `$HOME` and is edited in place. **Do not make a second copy** to
-work around a full filesystem or a busy node — on one cluster a fork like that
-drifted for days, with jobs running against one copy while the other held older
-code. If a second copy ever seems necessary, say so and get agreement first.
-
 ## Submitting jobs
 
 - **Ask for the smallest GPU that fits.** Where a cluster partitions GPUs (MIG),
@@ -79,18 +74,7 @@ code. If a second copy ever seems necessary, say so and get agreement first.
 
 Keep large artifacts (caches, checkpoints, outputs) on scratch, which is fast
 and usually not backed up or purged on a schedule; keep repos and anything you
-would miss on home, which is usually backed up. A shared `/project`-style
-allocation is the one to avoid for new work: it is shared with the whole group
-and typically runs out of *inodes* long before space.
+would miss on home, which is usually backed up. 
 
-Run `diskusage_report` (or the cluster's equivalent) rather than trusting any
-table — the numbers in a cluster's `AGENTS.md` are a snapshot from when someone
-last looked.
-
-Cache redirects (`HF_HOME`, `UV_CACHE_DIR`, `TMPDIR`, `WANDB_*`, …) belong in
+Cache redirects (`HF_HOME`, `UV_CACHE_DIR`, `TMPDIR`, `WANDB_*`, …) are set in
 `~/.bashrc` **above** any interactive guard, so `sbatch` jobs inherit them.
-
-## Shell traps that have bitten us
-
-- A `~/.bashrc` that ends with a `cd` into the current project means every new
-  tmux window and every job step starts *there*, not in `$HOME`.

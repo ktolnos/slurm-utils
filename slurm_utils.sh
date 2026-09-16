@@ -439,17 +439,6 @@ activate() {
     return 1
 }
 
-# cd, then activate a venv if the new directory has one.
-# No `cd` override. There used to be one here that ran `activate` after every
-# cd; it is gone rather than merely fixed. Overriding a builtin that every
-# script and every agent uses thousands of times, to get a convenience in one
-# of those uses, was not a good trade: the first version returned `activate`'s
-# exit status, so `cd dir && cmd` silently skipped `cmd` and reported success,
-# and even once that was fixed the override stayed a surprise that every
-# caller had to know about. $SLURM_UTILS_AUTO_ACTIVATE no longer does anything.
-#
-# Run `activate` when you want a venv. `uv run` needs no activation at all.
-
 # ------------------------------------------------------------------------------
 # DEVBOX
 # ------------------------------------------------------------------------------
