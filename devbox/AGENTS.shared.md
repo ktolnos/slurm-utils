@@ -1,23 +1,7 @@
 # Cluster rules (shared)
 
-Portable rules that hold on every Slurm cluster we run a devbox on. Import this
-from the cluster's own `AGENTS.md` rather than copying it, so a fix lands
-everywhere at once:
-
-```markdown
-@~/slurm-utils/devbox/AGENTS.shared.md
-```
-
-**Absolute, not relative.** A cluster's `AGENTS.md` lives in
-`clusters/<cluster>/` and is read through a symlink from the session root, so a
-relative path resolves against whichever directory the reader arrived by, not
-against this repo. On a root outside `$HOME` it points somewhere that does not
-exist — and a `@`-import that resolves to nothing fails silently, so the shared
-rules are simply absent with no dialog and no error.
-
-Anything with a number in it that differs per cluster — account name, partition
-ladder, GPU flags, quotas, the venv layout — belongs in that cluster's
-`AGENTS.md`, not here. See `AGENTS.template.md`.
+These hold on every cluster. The `AGENTS.md` that imports this one adds that
+cluster's own facts — account, GPU flags, walltime tiers, quotas, paths.
 
 ## The dev box is not a compute node
 
@@ -91,7 +75,7 @@ code. If a second copy ever seems necessary, say so and get agreement first.
 - **Editing a job script does not change an already-queued job** — Slurm
   snapshots the script at submit time. Cancel and resubmit to apply a change.
 
-## Storage
+## Storage: what goes where
 
 Keep large artifacts (caches, checkpoints, outputs) on scratch, which is fast
 and usually not backed up or purged on a schedule; keep repos and anything you

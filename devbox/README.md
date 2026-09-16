@@ -85,6 +85,33 @@ the root and the `--add-dir` list. Everything below marked
   have two clusters resuming one conversation -- two agents on one conversation
   corrupts it.
 
+## Editing the shared rules
+
+`AGENTS.shared.md` is imported into the instruction context of every session on
+every cluster, so treat its length as a running cost and keep maintenance notes
+out of it — an `@`-import splices the **whole** file, with no way to include
+only part, so anything in there is read by every agent on every request and is
+addressed to them, not to you. (An earlier version carried 21 lines of "import
+this, don't copy it" preamble, about 17% of the file, aimed at whoever edits it.)
+
+- **Import it, never copy it**, with an absolute `~/` path:
+  `@~/slurm-utils/devbox/AGENTS.shared.md`. A cluster's `AGENTS.md` is read
+  through a symlink from the session root, so a relative path resolves against
+  whichever directory the reader arrived by, not against this repo — and an
+  `@`-import that resolves to nothing **fails silently**: no dialog, no error,
+  the rules simply absent.
+- **An absolute path is an external include**, gated per root by
+  `hasClaudeMdExternalIncludesApproved` in `~/.claude.json`. Unapproved, the
+  session receives the literal `@…` line as its entire project instructions and
+  none of the file — also silently. `devbox-up` preflight seeds the flag; run
+  `devbox-up config` once on a cluster before wiring the import.
+- **Anything with a number in it that differs per cluster** — account, partition
+  ladder, GPU flags, quotas, venv layout — belongs in `clusters/<cluster>/AGENTS.md`.
+
+To check what a session really received, ask one: `claude -p "quote the section
+headings in your instructions"`. That is the only way to catch a silent
+non-expansion.
+
 ## The active project
 
 The session root cannot be the project you are working on: it is fixed by
