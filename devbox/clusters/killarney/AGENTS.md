@@ -94,11 +94,12 @@ jobs inherit them. Don't re-point them at `$HOME` or `/project`.
 
 - **`~/.bashrc` ends with `module load gcc` and `module load cuda/13.2`**, so every
   tmux window and job step gets `nvcc` (needed by vLLM/Triton JIT).
-- **`~/.bashrc` overrides `cd`** via `~/slurm-utils/slurm_utils.sh` to auto-activate
-  a `.venv`. Since 2026-09-15 that function preserves `cd`'s own exit status, so
-  `cd x && y` is safe again — it was not before, and silently skipped `y` in any
-  directory without a venv. The repo is a `uv` project and `uv run` needs no
-  activation, so `export SLURM_UTILS_AUTO_ACTIVATE=0` is reasonable here.
+- **Nothing overrides `cd`.** `slurm_utils.sh` used to, to auto-activate a
+  `.venv`, and it was removed on 2026-09-15: the first version returned
+  `activate`'s exit status, so `cd x && y` silently skipped `y` while reporting
+  success, and even fixed it stayed a surprise for every caller.
+  `SLURM_UTILS_AUTO_ACTIVATE` is inert. Run `activate` explicitly, or `uv run`,
+  which needs no activation.
 - **`/tmp` is job-private** (`job_container/tmpfs`), so `ssh <node> tmux attach`
   cannot see the devbox's tmux socket. Use `devbox-up attach [slot]`, which goes
   through `srun --jobid=<id> --overlap`.

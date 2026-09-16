@@ -440,19 +440,15 @@ activate() {
 }
 
 # cd, then activate a venv if the new directory has one.
-# On by default, as before. Opt out with `export SLURM_UTILS_AUTO_ACTIVATE=0`
-# before sourcing this file -- worth doing where the repos are uv projects, since
-# uv resolves their environment without activation.
-if [ "${SLURM_UTILS_AUTO_ACTIVATE:-1}" = 1 ]; then
-    cd() {
-        # Preserve cd's own exit status. The previous version returned
-        # `activate`'s status instead, which is non-zero in any directory
-        # without a venv -- so `cd dir && cmd` silently skipped cmd.
-        builtin cd "$@" || return $?
-        activate
-        return 0
-    }
-fi
+# No `cd` override. There used to be one here that ran `activate` after every
+# cd; it is gone rather than merely fixed. Overriding a builtin that every
+# script and every agent uses thousands of times, to get a convenience in one
+# of those uses, was not a good trade: the first version returned `activate`'s
+# exit status, so `cd dir && cmd` silently skipped `cmd` and reported success,
+# and even once that was fixed the override stayed a surprise that every
+# caller had to know about. $SLURM_UTILS_AUTO_ACTIVATE no longer does anything.
+#
+# Run `activate` when you want a venv. `uv run` needs no activation at all.
 
 # ------------------------------------------------------------------------------
 # DEVBOX
@@ -522,8 +518,5 @@ project() {
     if [ $# -gt 0 ]; then "$HOME/slurm-utils/devbox/active-project" "$1"; return; fi
     local p
     p=$("$HOME/slurm-utils/devbox/active-project") || return 1
-    # Plain `cd`, not `builtin cd`: the cd override is what activates the venv,
-    # and that is wanted here. Its exit status is activate's, so never chain.
     cd "$p"
-    return 0
 }
