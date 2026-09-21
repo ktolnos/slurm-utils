@@ -22,6 +22,7 @@ devbox-up config     # resolved config + the exact sbatch flags
 | `devbox-up` | submit / status / attach / restart / stop, with preflight |
 | `pin-session` | `SessionStart` hook that keeps each slot's uuid honest |
 | `active-project` | the active project pointer, and the hook that tells sessions about it |
+| `slurm-guard` | `PreToolUse` hook: blocks the `scontrol update` that crashes slurmctld |
 | `SETUP_INSTRUCTIONS.md` | step-by-step for a new cluster, written for an agent |
 | `AGENTS.shared.md` | portable cluster rules, imported by each cluster's `AGENTS.md` |
 | `AGENTS.template.md` | skeleton for a new cluster's `AGENTS.md`, with the blanks marked |

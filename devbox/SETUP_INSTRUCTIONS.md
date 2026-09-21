@@ -158,6 +158,37 @@ Note this edits the agent's own hook configuration. If you are an agent running
 under a permission policy, expect that write to need approval — ask rather than
 routing around it.
 
+## 6b. Install the slurm guard
+
+This one goes in `~/.claude/settings.json` — **user** level, not the root's
+`.claude/` — so it covers every session under this `$HOME`, not only the devbox
+slots. Merge the `hooks` key into whatever is already in that file; do not
+overwrite it:
+
+```json
+{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
+  "command": "$HOME/slurm-utils/devbox/slurm-guard",
+  "timeout": 10, "statusMessage": "slurm guard"}]}]}}
+```
+
+Verify, with a command that is only an `echo` and so is harmless if the hook is
+*not* working — it must come back denied:
+
+```bash
+echo 'scontrol update JobId=999999 NodeList='
+```
+
+It blocks `scontrol update ... NodeList=`/`ReqNodes=` with an empty value, which
+crashes `slurmctld` for the whole cluster on Slurm 23.02.1 (2026-08-19, and again
+2026-09-18 from a workflow subagent). Install it on every cluster whatever the
+version — one regex per Bash call against a failure nobody can recover from
+inside a session. `ExcNodeList=` is deliberately still allowed, empty or not,
+since that is the field you are meant to use instead.
+
+It is a hook rather than a rule in `AGENTS.md`, on purpose: a prompt-level rule
+is advice a subagent can reason past, and a subagent is what caused the second
+crash. Nothing is added to any `AGENTS.md` or `CLAUDE.md` for this.
+
 ## 7. Install `AGENTS.md`
 
 The cluster's rules live in git under `clusters/<cluster>/AGENTS.md` and are

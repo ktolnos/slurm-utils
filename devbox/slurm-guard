@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""PreToolUse hook for Bash: refuse `scontrol update ... NodeList=`/`ReqNodes=`
+with an EMPTY value.
+
+Why this exists: an empty req_nodes update crashes slurmctld for the whole
+cluster on Slurm 23.02.1 -- it did so on 2026-08-19 and again on 2026-09-18
+(job 1231144, issued by a Claude workflow subagent). Every job on the cluster
+dies with the controller and an admin has to restart it, so the blast radius is
+everyone's work, not just this session's.
+
+Installed on every cluster regardless of version (fir is 26.05.4 and not known
+to be affected): the cost is one regex per Bash call, and the failure it
+prevents is not recoverable from inside a session.
+
+Deliberately a hook and not a CLAUDE.md rule: a prompt-level rule is advice
+that a subagent can reason its way around, and the 2026-09-18 crash came from
+a subagent. This is enforcement -- it does not depend on the model reading it.
+
+Scans the whole command text, so it also refuses to WRITE a script containing
+the pattern, and over-blocking is the intended bias (a false positive costs one
+rephrase; a false negative costs the cluster).
+
+Install once per cluster, in ~/.claude/settings.json -- user level, so it
+covers every session under this $HOME rather than only the devbox roots:
+
+    {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
+      "command": "$HOME/slurm-utils/devbox/slurm-guard",
+      "timeout": 10, "statusMessage": "slurm guard"}]}]}}
+
+Exits 0 either way: a deny is carried in the JSON decision, and anything
+unexpected (unparseable stdin, no command) fails OPEN rather than wedging
+every Bash call in every session.
+"""
+import json
+import re
+import sys
+
+# NodeList= / Nodes= / ReqNodes= / ReqNodeList= followed by nothing, whitespace,
+# a shell separator, or an empty quoted string. Case-insensitive, because
+# scontrol itself accepts `nodelist=`.
+#
+# The leading \b is load-bearing in the other direction too: it keeps
+# ExcNodeList= from matching (no word boundary inside "ExcNodeList"), which is
+# the field you are actually meant to use, and which is safe to clear.
+#
+# ["']{1,2} rather than an empty-quote pair: ONE trailing quote is the common
+# case in practice, because it is what closes the surrounding string when the
+# command is being written into a script --
+#   echo 'scontrol update JobId=1 NodeList=' > retry.sh
+# leaves a single ' between the = and the space. Requiring a pair let exactly
+# that through. A quote followed by an actual value (NodeList="fc30354") still
+# does not match, because the lookahead then lands on `f`.
+EMPTY = re.compile(r"\b(?:req)?node(?:s|list)=[\"']{0,2}(?=\s|$|[;&|)>`])",
+                   re.IGNORECASE)
+
+REASON = (
+    "BLOCKED: `scontrol update ... NodeList=`/`ReqNodes=` with an empty value "
+    "crashes slurmctld for the entire cluster on Slurm 23.02.1 -- it happened "
+    "on 2026-08-19 and on 2026-09-18 (job 1231144), and every queued and "
+    "running job dies with the controller.\n"
+    "Instead: to relax a pending job's node constraint pass `ExcNodeList=...` "
+    "alone, or `scancel` and resubmit. Never set NodeList=/ReqNodes= to an "
+    "empty value, never write a script that does, and do not retry this "
+    "command -- if the controller is already down, retrying is what took it "
+    "down."
+)
+
+
+def main():
+    try:
+        cmd = json.load(sys.stdin).get("tool_input", {}).get("command") or ""
+    except Exception:
+        return                      # fail open: never block on our own bug
+    if not (re.search(r"\bscontrol\b", cmd) and re.search(r"\bupdate\b", cmd)):
+        return
+    if not EMPTY.search(cmd):
+        return
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": REASON,
+    }}))
+
+
+main()
+sys.exit(0)
