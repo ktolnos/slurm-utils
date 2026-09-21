@@ -39,17 +39,24 @@ command -v devbox-up            # -> ~/slurm-utils/devbox/devbox-up
 
 `slurm_utils.sh` adds `devbox/` to `PATH`, so nothing else needs installing.
 
-## 2. Install the two binaries (on the login node)
+## 2. Install the three binaries (on the login node)
 
-Both are self-contained; no node or npm needed.
+All are self-contained; no node or npm needed.
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash          # -> ~/.local/bin/claude
 mkdir -p ~/bin
 curl -fsSL 'https://update.code.visualstudio.com/latest/cli-linux-x64/stable' \
   | tar xz -C ~/bin                                     # -> ~/bin/code
-claude --version && ~/bin/code --version
+curl -fsSL https://chatgpt.com/codex/install.sh | sh    # -> ~/.local/bin/codex
+claude --version && ~/bin/code --version && codex --version
 ```
+
+Codex is optional -- `DEVBOX_CODEX=0` skips it and the box comes up without it.
+It lands as a static musl binary in `~/.codex/packages/standalone/releases/` with
+`~/.local/bin/codex` symlinked through `packages/standalone/current`, and its own
+updater reflows that symlink, so leave `DEVBOX_CODEX_BIN` pointing at the
+symlink.
 
 Add to `~/.bashrc`, near the top and **above any interactive guard** so batch
 jobs inherit it:
@@ -73,18 +80,29 @@ Verify: `sbatch` a one-line job that runs `which claude code` and check the
 output file. A non-login shell reads `.bashrc` and never `.bash_profile`, which
 is a common reason a binary is found interactively and not in a job.
 
-## 3. HUMAN STEP: authenticate both tools
+## 3. HUMAN STEP: authenticate all three tools
 
 ```bash
 claude                                      # /login, browser flow
 ~/bin/code tunnel user login --provider github
+codex login                                 # ChatGPT account
 ```
 
 You cannot do this for them; it is an account credential flow. Ask, then verify:
 
 ```bash
 ~/bin/code tunnel user show | grep -i 'logged in with'
+codex login status                          # "Logged in using ChatGPT"
 ```
+
+**Codex remote control needs MFA enabled on the ChatGPT account.** Without it the
+daemon starts and the remote-control websocket never connects, failing with
+`refresh_token_invalidated` in `~/.codex/app-server-daemon/app-server.stderr.log`
+while `codex login status` keeps claiming it is logged in. Ask them to enable MFA
+and run `codex login` again. Do **not** run `codex remote-control start` here to
+test it -- that is a login-node daemon on a shared-`$HOME` socket; see the codex
+section of `README.md`. The real check is the `codex:` line in the job log once
+the box is up.
 
 ## 4. Create the session root
 

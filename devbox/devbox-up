@@ -43,6 +43,27 @@ preflight() {
     [ -x "$DEVBOX_CLAUDE_BIN" ] || { echo "  MISSING: claude at $DEVBOX_CLAUDE_BIN"; bad=1; }
     [ -d "$DEVBOX_ROOT" ]       || { echo "  MISSING: session root $DEVBOX_ROOT"; bad=1; }
     [ -x "$DEVBOX_CODE_BIN" ]   || echo "  note: no code CLI at $DEVBOX_CODE_BIN -- the job runs, without a tunnel"
+    # Codex, checked but never started from here. `codex remote-control start`
+    # on a login node would bind ~/.codex/app-server-control/app-server-control.sock
+    # -- which is on shared $HOME, while the pid in the pid file next to it only
+    # means anything on the node that wrote it -- and so would clobber the
+    # control socket of the daemon running inside the live job. Only devbox.sh
+    # starts it. `login status` touches no daemon (verified) and is safe here.
+    if [ "$DEVBOX_CODEX" != 0 ]; then
+        if [ ! -x "$DEVBOX_CODEX_BIN" ]; then
+            echo "  note: no codex CLI at $DEVBOX_CODEX_BIN -- the job runs, without codex remote control"
+        # timeout, because this runs on the path that gates submitting the box:
+        # a codex that hangs here must cost a warning, not the whole devbox.
+        #
+        # ^: the match MUST be anchored. Logged in prints "Logged in using
+        # ChatGPT", but the logged-out strings in the binary are "Not logged in"
+        # and "is not logged in" -- an unanchored `grep -qi 'logged in'` matches
+        # those too and reports a logged-out codex as authenticated, i.e. exactly
+        # backwards.
+        elif ! timeout 30 "$DEVBOX_CODEX_BIN" login status 2>&1 | grep -qiE '^ *logged in'; then
+            echo "  note: codex is not logged in -- run 'codex login' here, or the box comes up without remote control"
+        fi
+    fi
     # Trust is the one thing that cannot be fixed from a batch job: a root whose
     # trust dialog has not been accepted (and persisted) blocks every job in the
     # chain, and $HOME can never persist it.
@@ -138,6 +159,19 @@ status)
     done
     echo "project : $("$DEVBOX_DIR/active-project" 2>/dev/null || echo '(none set -- run: active-project <dir>)')"
     echo "tunnel  : https://vscode.dev/tunnel/$DEVBOX_NAME"
+    # Read back what the job itself logged rather than asking codex anything:
+    # the daemon's own `version` query reports liveness but not whether the
+    # remote-control websocket is up, and a `start` from here would fight the
+    # job's daemon over the shared control socket (see preflight). At most one
+    # watchdog period (5 min) stale, and it carries the failure text verbatim.
+    if [ "$DEVBOX_CODEX" != 0 ]; then
+        if [ -z "$local_job" ]; then
+            echo "codex   : (no running job)"
+        else
+            codex_line=$(grep '^codex: ' "$DEVBOX_LOG_DIR/$DEVBOX_JOB_NAME-$local_job.out" 2>/dev/null | tail -1)
+            echo "codex   : ${codex_line:-(nothing logged yet -- this job predates codex; 'devbox-up restart' applies it to the next one)}"
+        fi
+    fi
     [ -n "$local_job" ] && {
         echo "windows :"
         srun --jobid="$local_job" --overlap tmux list-windows -t claude \
@@ -156,6 +190,10 @@ config)
     echo "root        : $DEVBOX_ROOT"
     echo "slots       : $DEVBOX_SLOTS"
     echo "name        : $DEVBOX_NAME (tunnel), $DEVBOX_NAME-<slot> (remote control)"
+    # No name of ours here: codex reports gethostname() to the app, so the box
+    # shows up under the current node name and changes on every hop. The
+    # environment behind it is stable, which is what actually matters.
+    echo "codex       : $([ "$DEVBOX_CODEX" != 0 ] && echo "on ($DEVBOX_CODEX_BIN), app shows the node's hostname" || echo 'off (DEVBOX_CODEX=0)')"
     echo "state       : $DEVBOX_STATE"
     echo "submit from : $DEVBOX_SUBMIT_DIR"
     echo "project     : $("$DEVBOX_DIR/active-project" 2>/dev/null || echo '(none set)')"

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Long-lived, self-chaining CPU-only devbox: one Claude Code session per slot
 # plus one `code tunnel`, all as windows of a single tmux session, so you can
-# drive several agents from any device and keep them across node hops.
+# drive several agents from any device and keep them across node hops. Plus one
+# codex app-server daemon, which is not a tmux window -- see launch_codex.
 #
 # Launch it with `devbox-up`, never with a bare `sbatch` -- all resource flags
 # come from config.sh (see devbox_sbatch_flags), because a #SBATCH --output
@@ -167,11 +168,81 @@ launch_tunnel() {
         "cd '$REPO'; '$DEVBOX_CODE_BIN' tunnel --accept-server-license-terms --name $DEVBOX_NAME >> '$TUNNEL_LOG' 2>&1" C-m
 }
 
+# Codex remote control. Deliberately NOT a tmux window: `remote-control start`
+# forks the app-server daemon, prints one JSON line and exits, so a pane would
+# just sit at a shell prompt. It is a call, it is idempotent (`alreadyRunning`),
+# it takes ~0.3 s, and on a daemon that is already up it re-enables remote
+# control -- which makes the same call the start path AND the repair path, so the
+# watchdog below has nothing else to do.
+#
+# One daemon serves the whole box; there is no per-slot equivalent of
+# DEVBOX_SLOTS. The ChatGPT app creates and drives sessions inside it (`codex
+# agents` lists them from here), so there is no conversation id to pin either.
+#
+# Node hops are free: the enrollment (server_id + environment_id) is persisted
+# under ~/.codex and reused, so fir's box kept one environment when it moved
+# fc30355 -> fc30354. Only the display name follows gethostname(), which is not
+# overridable -- the app shows the bare node name, not $DEVBOX_NAME.
+#
+# The daemon and its updater reparent to init but stay in the job's cgroup
+# (verified), so they die with the job rather than leaking onto the node.
+codex_field() { printf '%s' "$2" | grep -o "\"$1\":\"[^\"]*\"" | head -1 | cut -d'"' -f4; }
+
+# "" until the first check, then up/down/absent. Only a CHANGE is logged, so a
+# healthy box costs one line per job rather than one line per minute.
+CODEX_STATE=""
+launch_codex() {
+    [ "$DEVBOX_CODEX" != 0 ] || return 0
+    if [ ! -x "$DEVBOX_CODEX_BIN" ]; then
+        [ "$CODEX_STATE" = absent ] || echo "codex: no CLI at $DEVBOX_CODEX_BIN -- skipping"
+        CODEX_STATE=absent; return 1
+    fi
+    # timeout: `start` has its own connect deadline (it reports timedOut) but a
+    # wedged daemon must not stall the per-slot watchdog queued behind it. 60 s
+    # is ~200x the measured call (0.3 s warm, similar cold), and the two failure
+    # modes are asymmetric: too short costs one spurious "down" line and a retry
+    # 5 min later, too long delays relaunching a dead agent slot -- which has
+    # only a 180 s grace of its own.
+    local out state
+    out=$(timeout 60 "$DEVBOX_CODEX_BIN" remote-control start --json 2>&1)
+    # Matched against the whole blob on purpose. There are two "status" fields --
+    # top-level connection and nested daemon lifecycle -- but only the former is
+    # ever "connected" (the latter is started/bootstrapped/alreadyRunning), so
+    # this does not depend on serde's field order.
+    case "$out" in *'"status":"connected"'*) state=up ;; *) state=down ;; esac
+    [ "$state" = "$CODEX_STATE" ] && return 0
+    CODEX_STATE=$state
+    if [ "$state" = up ]; then
+        echo "codex: remote control connected as $(codex_field serverName "$out") (env $(codex_field environmentId "$out"))"
+    else
+        # ${out:-...}: a `timeout` kill leaves $out empty, and a bare
+        # "NOT connected -- " with nothing after it reads like a parsing bug.
+        echo "codex: NOT connected -- ${out:-no output (timed out after 60s?)}"
+        # The one failure seen so far: refresh_token_invalidated, which needs a
+        # fresh `codex login` on the login node and MFA enabled on the account.
+        # `codex login status` still says "Logged in" in that state, so the
+        # status field above is the only honest signal.
+        echo "codex: re-run 'codex login' on the login node (the account needs MFA enabled)"
+    fi
+    [ "$state" = up ]
+}
+
 if start_tmux; then launch_agents; launch_tunnel
 else echo "FATAL: no tmux server; watchdog below keeps retrying"; fi
+launch_codex     # independent of tmux: no window, no session to wait for
+CODEX_CHECKED=$SECONDS
 
 while true; do
     sleep 60
+    # Codex first, and before the tmux checks: it does not live in the tmux
+    # session, and the branch below `continue`s on a dead session, which would
+    # otherwise stop the daemon ever being re-checked on the box that needs it
+    # most. Every 5 min rather than every minute -- one idempotent call is both
+    # the liveness probe and the repair, so the only cost of a longer period is
+    # how stale a "down" line can be.
+    if [ $(( SECONDS - CODEX_CHECKED )) -ge 300 ]; then
+        CODEX_CHECKED=$SECONDS; launch_codex
+    fi
     [ -f "$TUNNEL_LOG" ] && [ "$(stat -c %s "$TUNNEL_LOG")" -gt 52428800 ] && : > "$TUNNEL_LOG"
     # Watchdog: agents and tunnel are windows of this one session, so losing it
     # means idling for the rest of the walltime unless something rebuilds it.

@@ -108,9 +108,21 @@ DEVBOX_NAME="${DEVBOX_NAME:-${DEVBOX_CLUSTER}-dev}"
 DEVBOX_STATE="${DEVBOX_STATE:-$HOME/.devbox/$DEVBOX_CLUSTER}"
 DEVBOX_LOG_DIR="${DEVBOX_LOG_DIR:-$HOME/logs}"
 
-# Binaries. Both are self-contained downloads; see README.md.
+# Binaries. All three are self-contained downloads; see README.md.
 DEVBOX_CLAUDE_BIN="${DEVBOX_CLAUDE_BIN:-$HOME/.local/bin/claude}"
 DEVBOX_CODE_BIN="${DEVBOX_CODE_BIN:-$HOME/bin/code}"
+# codex's own installer symlinks this at ~/.codex/packages/standalone/current,
+# which its auto-updater reflows -- so point at the symlink, never at a
+# versioned path that the next update invalidates.
+DEVBOX_CODEX_BIN="${DEVBOX_CODEX_BIN:-$HOME/.local/bin/codex}"
+
+# Codex remote control: one app-server daemon for the whole box, so sessions
+# started from the ChatGPT app run here. Exactly `0` disables it and any other
+# value enables it -- tested `!= 0` rather than `= 1` so that DEVBOX_CODEX=true
+# or =yes cannot silently mean "off". Unlike the agent slots there is nothing
+# per-slot to configure: the daemon is a singleton and the app creates sessions
+# inside it.
+DEVBOX_CODEX="${DEVBOX_CODEX:-1}"
 
 # Where to submit from, and anything else this cluster needs on the sbatch line.
 DEVBOX_SUBMIT_DIR="${DEVBOX_SUBMIT_DIR:-$HOME}"

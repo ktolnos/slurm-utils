@@ -12,7 +12,8 @@ few GB, no GPU. `devbox-up config` prints what this cluster asked for.
 
 **Never run training, inference, vLLM, or a test suite in it.** A vLLM import
 alone will exceed the memory cap. The cap is per job, not per session, so an
-OOM kills every agent slot *and* the tunnel at once, not just the offender.
+OOM kills every agent slot, the codex daemon *and* the tunnel at once, not just
+the offender.
 
 To get real hardware, either submit a batch job, or hold an allocation and reuse
 it for every command:
@@ -47,7 +48,9 @@ other slots agree.
 ## You are not the only agent here
 
 Several agent slots share one devbox and one source tree, and any of them may
-have jobs in the queue. This is the normal case, not the exception.
+have jobs in the queue. This is the normal case, not the exception. Nor are they
+all Claude Code: codex sessions started from the ChatGPT app share the box and
+the tree without appearing as tmux windows.
 
 - **Don't cancel jobs you didn't submit** without explicit permission. Use
   `devbox-up restart` for the devbox chain itself, which only touches the

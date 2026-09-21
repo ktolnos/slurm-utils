@@ -1,9 +1,10 @@
-# Devbox: Claude Code + VS Code tunnel on a Slurm cluster
+# Devbox: Claude Code + codex + VS Code tunnel on a Slurm cluster
 
 A long-lived, self-chaining CPU-only Slurm job that hosts **three** Claude Code
-sessions and a `code tunnel`, so you get a persistent dev box with three
-independently drivable agents, reachable from desktop VS Code, phone or
-claude.ai.
+sessions, a `codex` app-server daemon and a `code tunnel`, so you get a
+persistent dev box with three independently drivable agents plus codex sessions
+you start from the ChatGPT app, reachable from desktop VS Code, phone,
+claude.ai or chatgpt.com.
 
 ```bash
 devbox-up            # submit it
@@ -17,7 +18,7 @@ devbox-up config     # resolved config + the exact sbatch flags
 | File | What it is |
 |---|---|
 | `config.sh` | every knob, and the only place a cluster name appears |
-| `devbox.sh` | the job: tmux session, agent slots, tunnel, watchdog |
+| `devbox.sh` | the job: tmux session, agent slots, tunnel, codex daemon, watchdog |
 | `devbox-up` | submit / status / attach / restart / stop, with preflight |
 | `pin-session` | `SessionStart` hook that keeps each slot's uuid honest |
 | `active-project` | the active project pointer, and the hook that tells sessions about it |
@@ -28,8 +29,8 @@ devbox-up config     # resolved config + the exact sbatch flags
 | `settings.json` | both `SessionStart` hooks, symlinked into every root's `.claude/` |
 
 Defaults: root `~/devbox` with `--add-dir $HOME`, tunnel `<cluster>-dev`,
-3 slots, 2 cores / 6 GB / no GPU, 3-day walltime, account from
-`$SBATCH_ACCOUNT`. Override any of them from the environment
+3 slots, codex remote control on, 2 cores / 6 GB / no GPU, 3-day walltime,
+account from `$SBATCH_ACCOUNT`. Override any of them from the environment
 (`DEVBOX_SLOTS="1 2" devbox-up`) or in `config.sh`, whose per-cluster `case`
 runs before the defaults — precedence is `environment > stanza > default`.
 
@@ -185,19 +186,26 @@ Slot 1 was the original single-agent devbox: its id file was migrated into
 `~/.devbox/fir/session-id-1` and its Remote Control name went from `fir-dev` to
 `fir-dev-1`. Only the tunnel is still plain `fir-dev`.
 
-## 1. The two binaries (login node)
+## 1. The three binaries (login node)
 
-Both self-contained; no node/npm needed.
+All self-contained; no node/npm needed.
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash          # -> ~/.local/bin/claude
 mkdir -p ~/bin
 curl -fsSL 'https://update.code.visualstudio.com/latest/cli-linux-x64/stable' \
   | tar xz -C ~/bin                                     # -> ~/bin/code
+curl -fsSL https://chatgpt.com/codex/install.sh | sh    # -> ~/.local/bin/codex
 ```
 
 **Not** the Killarney URL (`code.visualstudio.com/sha/download?...`) -- that
 endpoint now returns 404.
+
+Codex installs as a statically linked musl release under
+`~/.codex/packages/standalone/releases/<version>-x86_64-unknown-linux-musl`,
+with `~/.local/bin/codex` -> `packages/standalone/current` -> that release, and
+it keeps itself updated from the same URL (`codex update` forces it). Point
+`DEVBOX_CODEX_BIN` at the symlink, never at a release path.
 
 ## 2. `~/.bashrc`
 
@@ -223,6 +231,7 @@ else needed moving. Backup of the original: `~/.bashrc.bak-devbox`.
 ```bash
 claude                                    # /login, browser flow
 ~/bin/code tunnel user login --provider github
+codex login                               # ChatGPT account; needs MFA enabled
 ```
 
 ## 4. Start it
@@ -246,6 +255,10 @@ From a phone or any browser, the three agents show up separately in Remote
 Control as `fir-dev-1`, `fir-dev-2` and `fir-dev-3`; each also prints its own
 `https://claude.ai/code/session_...` link in its pane at startup.
 
+Codex is reached from the ChatGPT app instead, where the box appears under the
+**current node's hostname** (`fc30354`) rather than `fir-dev`, and sessions are
+created there rather than waiting in slots -- see the codex section below.
+
 To reach the tmux session directly (`ssh <node>` does **not** work here -- see
 below):
 
@@ -261,6 +274,113 @@ One-shot look at every slot without attaching:
 for w in agent1 agent2 agent3; do echo "== $w"; \
   srun --jobid=$JOB --overlap tmux capture-pane -t claude:$w -p | tail -5; done
 ```
+
+---
+
+## Codex remote control
+
+`codex` is the third binary, and it joins the box differently from the other
+two: **one app-server daemon for the whole devbox, not one per slot.** Sessions
+are created from the ChatGPT app and run inside that daemon; `codex agents`
+lists them from a shell on the box. So there is no name to choose, no
+conversation id to pin, and nothing in tmux -- `DEVBOX_SLOTS` has no codex
+equivalent and does not need one.
+
+`devbox.sh` starts it with one call:
+
+```bash
+codex remote-control start --json
+```
+
+which forks the daemon, prints a JSON line and exits in ~0.3 s. It is
+idempotent -- a second call answers `"daemon":{"status":"alreadyRunning"}` -- and
+against a daemon that is already up it re-enables remote control, so the *same*
+call is both the start path and the repair path. The watchdog therefore just
+re-issues it every 5 min, and logs only when the state changes:
+
+```
+codex: remote control connected as fc30354 (env env_e_6aac66ec...)
+```
+
+Set `DEVBOX_CODEX=0` to leave codex out of the box entirely.
+
+### The app shows the node name, and that is fine
+
+The `serverName` the app displays is `gethostname()`, not `$DEVBOX_NAME`: it is
+`fc30354`, it changes on every node hop, and nothing overrides it -- there is no
+config key for it and `HOSTNAME=fir-dev codex remote-control start` still
+reports the node.
+
+What does *not* change is the identity behind that label. The enrollment
+(`server_id` + `environment_id`) is persisted under `~/.codex` and reused across
+nodes: the box enrolled on `fc30355` on 2026-09-17 and came back up on
+`fc30354` on 2026-09-21 with the same `srv_e_...` **and** the same `env_e_...`
+(`reusing persisted remote control enrollment` in `~/.codex/logs_2.sqlite`). One
+stable environment in the app, wearing whatever node name it woke up on.
+
+### Never run `codex remote-control start` on the login node
+
+Measured: the control socket is
+`~/.codex/app-server-control/app-server-control.sock` and the pid file is
+`app-server-daemon/app-server.pid` beside it -- both on **shared** `$HOME`,
+while the pid inside the file (plus a `processStartTime`) only means anything on
+the node that wrote it. Codex does recover from a stale one: this box
+bootstrapped cleanly today over a pid file left by the 2026-09-17 job on another
+node.
+
+Which is exactly the hazard. A codex started on the login node while the box is
+up sees a pid it cannot verify against its own process table, and the recovery
+path that makes node hops work is then free to take the socket out from under
+the daemon in the live job. Not worth reproducing to find out how gracefully.
+
+That is why `devbox-up` never starts codex -- only `devbox.sh` does -- and why
+`devbox-up status` reads the last `codex:` line back out of the job log instead
+of asking codex anything. `codex login status` touches no daemon and is safe
+anywhere, which is what preflight uses; plain `codex` on the login node is not,
+while the box is up.
+
+### The processes, and the memory cap
+
+Two of them, both reparented to init but both still inside the job's cgroup
+(checked in `/proc/<pid>/cgroup`), so they die with the job and never leak onto
+the node:
+
+| Process | RSS | What it is |
+|---|---|---|
+| `codex app-server --remote-control --listen unix://` | ~110 MB | the daemon |
+| `codex app-server daemon pid-update-loop` | ~25 MB | its auto-updater sidecar |
+
+~135 MB against the box's 6 GiB, next to ~800 MB for three Claude sessions --
+so codex costs about a sixth of one agent slot. Note that `remote-control stop`
+stops the daemon and leaves the updater running.
+
+That updater reflows `~/.codex/packages/standalone/current`, which is why
+`DEVBOX_CODEX_BIN` points at the `~/.local/bin/codex` symlink (itself a link
+into `current`) rather than at a versioned release path that the next update
+would strand.
+
+**A codex session is an agent doing real work, so every devbox rule applies to
+it unchanged**: no training, no inference, no test suites. The memory cap is per
+*job*, so a codex session that imports vLLM takes the three Claude slots and the
+tunnel down with it.
+
+### The auth failure to expect
+
+The first attempt at this came up with the daemon running and remote control
+never connecting, and the reason was only ever written to
+`~/.codex/app-server-daemon/app-server.stderr.log`:
+
+```
+ERROR codex_login::auth::manager: Failed to refresh token: 401 Unauthorized:
+  "Your refresh token has been invalidated. Please try signing in again."
+  code: refresh_token_invalidated
+```
+
+The fix was enabling MFA on the account and re-running `codex login` on the
+login node. Note that `codex login status` still reports `Logged in using
+ChatGPT` in that state, so it is not a usable health check -- the `"status"`
+field of `remote-control start` is the only honest signal, and that is what
+`launch_codex` tests.
 
 ---
 
