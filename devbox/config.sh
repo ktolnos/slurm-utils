@@ -21,8 +21,24 @@ devbox_cluster() {
     [ -n "${CC_CLUSTER:-}" ]     && { printf '%s\n' "$CC_CLUSTER"; return; }
     local n
     n=$(scontrol show config 2>/dev/null | awk '/^ClusterName/{print $3; exit}')
-    [ -n "$n" ] && [ "$n" != "(null)" ] && { printf '%s\n' "$n"; return; }
-    [ -n "${SLURM_CLUSTER_NAME:-}" ] && { printf '%s\n' "$SLURM_CLUSTER_NAME"; return; }
+    # "slurm" is slurm.conf's compiled-in default, not a name anyone chose: a
+    # site that never set ClusterName reports it (CHAI does), and taking it at
+    # face value would name the tunnel "slurm-dev" and key the state directory
+    # on a string every such site shares. Treat it as unset, like "(null)".
+    case "$n" in ''|'(null)'|slurm|cluster|linux) n= ;; esac
+    [ -n "$n" ] && { printf '%s\n' "$n"; return; }
+    case "${SLURM_CLUSTER_NAME:-}" in
+        ''|slurm|cluster|linux) ;;
+        *) printf '%s\n' "$SLURM_CLUSTER_NAME"; return ;;
+    esac
+    # The DNS domain before the hostname: it is identical on the login node and
+    # on every compute node, which `hostname -s` is not. Falling straight to the
+    # hostname would resolve to "rnn" on the login node and "ppo"/"gan"/... in a
+    # job, i.e. a different tunnel name, state directory and set of pinned
+    # conversations on every node hop.
+    local d
+    d=$(hostname -d 2>/dev/null | cut -d. -f1)
+    [ -n "$d" ] && { printf '%s\n' "$d"; return; }
     hostname -s | sed 's/[0-9]*$//'
 }
 DEVBOX_CLUSTER="$(devbox_cluster)"
@@ -65,6 +81,48 @@ case "$DEVBOX_CLUSTER" in
         DEVBOX_ROOT="${DEVBOX_ROOT:-/project/6101830/eop/unlearning-reward-hacking}"
         DEVBOX_ADD_DIRS="${DEVBOX_ADD_DIRS:-$HOME ${SCRATCH:-/scratch/$USER}}"
         ;;
+    ist|chai)
+        # CHAI (UC Berkeley). Matched under both labels on purpose: the name is
+        # derived from the ist.berkeley.edu domain and then normalised to the
+        # lab's name below, so a re-source of this file -- devbox.sh and
+        # active-project both do it -- arrives with DEVBOX_CLUSTER already
+        # "chai" and must still pick up the rest of the stanza.
+        DEVBOX_CLUSTER=chai
+
+        # $HOME IS NODE-LOCAL HERE. rnn's /home/eop and ppo's /home/eop are
+        # different disks (verified: different fs, and ppo's copy has no claude
+        # binary, no ~/.claude.json and so no workspace trust and no
+        # conversation history). /nas/ucb is the only filesystem mounted on
+        # every node, and binaries do execute from it (verified). So every
+        # durable path below points there rather than at $HOME.
+        #
+        # rnn's / is also 100% full with ~1.6 GB free on a 30 GB quota, so a
+        # $HOME-based box would be fragile even without the node-hop problem.
+        DEVBOX_CONFIG_HOME="${DEVBOX_CONFIG_HOME:-/nas/ucb/eop}"
+        DEVBOX_STATE="${DEVBOX_STATE:-/nas/ucb/eop/.devbox/chai}"
+        # Logs on the 60-day bulk share: they are disposable, the tunnel log is
+        # the one file here that can reach tens of MB, and neither belongs on a
+        # backed-up share.
+        DEVBOX_LOG_DIR="${DEVBOX_LOG_DIR:-/nas/ttl=60d/eop/logs}"
+        # Fallback working directory only -- the agents start in the active
+        # project (see devbox.sh). This is where they land when none is set.
+        DEVBOX_ROOT="${DEVBOX_ROOT:-/nas/ucb/eop/slurm-utils}"
+        # $HOME is per-node and small but still worth reaching; /nas/ucb/eop is
+        # the real home here and /nas/ttl=60d/eop is this site's scratch.
+        DEVBOX_ADD_DIRS="${DEVBOX_ADD_DIRS:-$HOME /nas/ucb/eop /nas/ttl=60d/eop}"
+        DEVBOX_CLAUDE_BIN="${DEVBOX_CLAUDE_BIN:-/nas/ucb/eop/.local/bin/claude}"
+        DEVBOX_CODE_BIN="${DEVBOX_CODE_BIN:-/nas/ucb/eop/bin/code}"
+        DEVBOX_CODEX_BIN="${DEVBOX_CODEX_BIN:-/nas/ucb/eop/.local/bin/codex}"
+        # rnn is a "wild west" box: it is the Slurm submit node but is NOT part
+        # of the Slurm cluster's compute, so hosting the devbox there costs no
+        # allocation and competes with no queued job. It also has no walltime,
+        # which is the whole reason the job chains itself elsewhere.
+        DEVBOX_LOCAL="${DEVBOX_LOCAL:-1}"
+        # Used only when DEVBOX_LOCAL=0, i.e. the fallback for when rnn is
+        # wedged or full. Slurm resolves no default account here.
+        DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-chai}"
+        DEVBOX_PARTITION="${DEVBOX_PARTITION:-main}"
+        ;;
     *)
         # Unknown cluster: the defaults are the portable ones. If the first
         # `devbox-up` fails, the flag it rejects is the thing to add above.
@@ -81,6 +139,14 @@ DEVBOX_CPUS="${DEVBOX_CPUS:-2}"
 DEVBOX_MEM="${DEVBOX_MEM:-6G}"
 DEVBOX_TIME="${DEVBOX_TIME:-3-00:00:00}"
 DEVBOX_AUTOCOMPACT="${DEVBOX_AUTOCOMPACT:-500k}"
+
+# Update claude/codex/code before launching them. This happens in devbox-up on
+# the SUBMIT node, never inside the job -- see update_binaries there. 0 disables
+# it (pin a version by turning this off; nothing here can express "2.1.278").
+DEVBOX_UPDATE="${DEVBOX_UPDATE:-1}"
+# Per-binary cap. Generous, because it is a download, but bounded: an update
+# that hangs must not hold up the box indefinitely.
+DEVBOX_UPDATE_TIMEOUT="${DEVBOX_UPDATE_TIMEOUT:-300}"
 
 # Session root. NOT $HOME: home-directory workspace trust is session-only and
 # never persists, so a home-rooted job stops at the trust dialog on every node
@@ -108,6 +174,24 @@ DEVBOX_NAME="${DEVBOX_NAME:-${DEVBOX_CLUSTER}-dev}"
 DEVBOX_STATE="${DEVBOX_STATE:-$HOME/.devbox/$DEVBOX_CLUSTER}"
 DEVBOX_LOG_DIR="${DEVBOX_LOG_DIR:-$HOME/logs}"
 
+# Where the agents' own durable state lives: Claude Code's config, workspace
+# trust and conversation history; the VS Code tunnel's GitHub token; codex's
+# enrollment. $HOME is right wherever $HOME is shared between the login node
+# and the compute nodes, which is the usual case.
+#
+# Where it is NOT -- a site with node-local homes -- every one of those is
+# missing on the other side of a node hop, and the failure is quiet and total:
+# no trust (so every slot parks on a dialog), no history (so every --resume
+# silently degrades to a fresh --session-id), no tunnel token. Point this at a
+# filesystem all the nodes mount and the whole set travels together.
+DEVBOX_CONFIG_HOME="${DEVBOX_CONFIG_HOME:-$HOME}"
+# CLAUDE_CONFIG_DIR relocates Claude Code's whole config directory INCLUDING
+# .claude.json, which holds the trust flags (verified against 2.1.278) -- it is
+# not just a cache location, so it is the single variable that has to be right.
+DEVBOX_CLAUDE_CONFIG_DIR="${DEVBOX_CLAUDE_CONFIG_DIR:-$DEVBOX_CONFIG_HOME/.claude}"
+DEVBOX_VSCODE_DATA_DIR="${DEVBOX_VSCODE_DATA_DIR:-$DEVBOX_CONFIG_HOME/.vscode-cli}"
+DEVBOX_CODEX_HOME="${DEVBOX_CODEX_HOME:-$DEVBOX_CONFIG_HOME/.codex}"
+
 # Binaries. All three are self-contained downloads; see README.md.
 DEVBOX_CLAUDE_BIN="${DEVBOX_CLAUDE_BIN:-$HOME/.local/bin/claude}"
 DEVBOX_CODE_BIN="${DEVBOX_CODE_BIN:-$HOME/bin/code}"
@@ -123,6 +207,14 @@ DEVBOX_CODEX_BIN="${DEVBOX_CODEX_BIN:-$HOME/.local/bin/codex}"
 # per-slot to configure: the daemon is a singleton and the app creates sessions
 # inside it.
 DEVBOX_CODEX="${DEVBOX_CODEX:-1}"
+
+# Run the box directly on this machine instead of inside a Slurm job. Anything
+# but 0 means local. Use it where the login node is meant to be used directly
+# and is not itself Slurm compute: there is then no walltime to escape, so the
+# self-chaining -- the reason most of devbox.sh is shaped the way it is -- buys
+# nothing, and the job would only add a queue and a node hop. tmux survives the
+# ssh session either way; that is not what Slurm was providing.
+DEVBOX_LOCAL="${DEVBOX_LOCAL:-0}"
 
 # Where to submit from, and anything else this cluster needs on the sbatch line.
 DEVBOX_SUBMIT_DIR="${DEVBOX_SUBMIT_DIR:-$HOME}"

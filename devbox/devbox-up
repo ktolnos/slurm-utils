@@ -5,7 +5,12 @@
 #   devbox-up status     what is running, which slots, where to reach them
 #   devbox-up attach [N] attach to the tmux session, or straight to slot N
 #   devbox-up restart    resubmit the chain with the current script + config
+#   devbox-up restart --now  ...and take the running box down, so it applies
+#                            immediately instead of at the next walltime
 #   devbox-up stop       stop the chain (stop file, then cancel)
+#
+# `up` and `restart` update claude/codex/code first (DEVBOX_UPDATE=0, or
+# --no-update, to skip). The job launches whatever the symlinks point at then.
 #   devbox-up config     print the resolved configuration and sbatch flags
 #
 # Every resource flag comes from config.sh, so `restart` is also how you apply
@@ -15,6 +20,82 @@ set -u
 DEVBOX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=config.sh
 source "$DEVBOX_DIR/config.sh"
+
+# The same relocation devbox.sh does, and for the same reason -- but it matters
+# here too: preflight reads workspace trust out of .claude.json and asks codex
+# whether it is logged in, and both of those live under these directories. With
+# $HOME assumed, preflight on a node-local-$HOME site would cheerfully validate
+# a different machine's config than the one the agents will use.
+export CLAUDE_CONFIG_DIR="$DEVBOX_CLAUDE_CONFIG_DIR"
+export CODEX_HOME="$DEVBOX_CODEX_HOME"
+export VSCODE_CLI_DATA_DIR="$DEVBOX_VSCODE_DATA_DIR"
+
+# Where the agents will actually start. Same resolution as devbox.sh: the
+# active project, falling back to the root when none is set or it has gone.
+devbox_workdir() {
+    local p; p=$("$DEVBOX_DIR/active-project" 2>/dev/null)
+    [ -n "$p" ] && [ -d "$p" ] && { printf '%s\n' "$p"; return; }
+    printf '%s\n' "$DEVBOX_ROOT"
+}
+# Slot ids are per (project, slot) -- see devbox.sh.
+devbox_slot_dir() {
+    printf '%s/projects/%s\n' "$DEVBOX_STATE" "$(printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g')"
+}
+
+# --- local mode ---------------------------------------------------------------
+# devbox.sh writes this itself, because `setsid nohup ... &` reports the pid of
+# a process that may already have forked away, so $! is not reliably the box.
+LOCAL_PID_FILE="$DEVBOX_STATE/local.pid"
+local_host() { awk '{print $2}' "$LOCAL_PID_FILE" 2>/dev/null; }
+local_pid()  { awk '{print $1}' "$LOCAL_PID_FILE" 2>/dev/null; }
+local_running() {
+    local pid host; pid=$(local_pid); host=$(local_host)
+    [ -n "$pid" ] || return 1
+    # A pid is only meaningful on the machine that minted it: checking one from
+    # another node would report some unrelated process as the devbox.
+    [ "$host" = "$(hostname -s)" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+start_local() {
+    mkdir -p "$DEVBOX_STATE" "$DEVBOX_LOG_DIR"
+    local log="$DEVBOX_LOG_DIR/$DEVBOX_JOB_NAME-local-$(hostname -s).out"
+    # setsid + nohup: the box must outlive the ssh session that started it.
+    # tmux would survive on its own, but the watchdog that rebuilds a dead
+    # session and relaunches a dead slot is this script, not tmux.
+    unset TMUX TMUX_PANE
+    setsid nohup "$DEVBOX_DIR/devbox.sh" >> "$log" 2>&1 &
+    # devbox.sh writes the pid file once it is up; give it a moment.
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        local_running && break
+        sleep 1
+    done
+    if local_running; then echo "started: pid $(local_pid) on $(hostname -s)"
+    else echo "started, but no pid file yet -- check the log"; fi
+    echo "log: $log"
+}
+stop_local() {
+    local pid host; pid=$(local_pid); host=$(local_host)
+    if local_running; then
+        echo "stopping pid $pid"
+        kill "$pid" 2>/dev/null
+        local i
+        for i in 1 2 3 4 5; do local_running || break; sleep 1; done
+        local_running && { echo "still alive after 5s, sending KILL"; kill -9 "$pid" 2>/dev/null; }
+    elif [ -n "$pid" ] && [ "$host" != "$(hostname -s)" ]; then
+        echo "recorded as running on $host, not here -- stop it there"
+        return 1
+    else
+        echo "no local devbox running here"
+    fi
+    # Killing the watchdog does NOT kill the agents: they are tmux windows, and
+    # surviving their parent is the entire point of tmux. Take the session down
+    # too, or a restart finds the old agents still holding the pinned
+    # conversations and the new ones cannot resume them.
+    tmux has-session -t claude 2>/dev/null && { tmux kill-session -t claude; echo "tmux session killed"; }
+    rm -f "$LOCAL_PID_FILE"
+    return 0
+}
 
 # "$1" is the format; anything after it is passed through to squeue, so
 # `jobs_of '%i' -t PENDING` really filters (an earlier version dropped the
@@ -38,10 +119,58 @@ submit() {
     ( cd "$DEVBOX_SUBMIT_DIR" 2>/dev/null; sbatch "${flags[@]}" --dependency=singleton "$DEVBOX_DIR/devbox.sh" )
 }
 
+# --- keeping the launched binaries current ------------------------------------
+# Runs HERE, on the submit node, and deliberately NOT inside devbox.sh:
+#   - compute nodes are not reliably on the internet (an update that works from
+#     the login node can simply hang inside the job),
+#   - an unattended 3am chain hop is the worst possible place to meet a bad
+#     release, with no one watching and every slot restarting into it,
+#   - and a version change under a resumed conversation should be something a
+#     person typed a command to get.
+# So the binaries are refreshed when you run `devbox-up` / `devbox-up restart`,
+# and the job launches whatever the symlinks point at by then.
+#
+# The HOME override is the entire point on a node-local-$HOME site: claude's
+# native installer resolves its install root from $HOME, so the auto-updater
+# running in a login shell quietly maintains a SECOND install that the devbox
+# never launches. That is exactly how this box sat on 2.1.278, unable to select
+# a model released that morning, while `claude --version` said 2.1.280.
+#
+# Nothing here is fatal. A network blip must cost a stale binary, not the box.
+# `sed 's/ (.*)$//'` trims the trailers these three hang off the number --
+# "(Claude Code)", "(commit 7debcd0e...)" -- so a version line reads as a version.
+bin_version() { timeout 30 "$1" --version 2>/dev/null | tr -d '\r' | head -1 | sed 's/ (.*)$//'; }
+update_one() {
+    local label=$1 bin=$2; shift 2
+    [ -x "$bin" ] || return 0
+    local before after
+    before=$(bin_version "$bin")
+    # </dev/null: an updater that stops to ask something must fail fast, not
+    # sit on the terminal for the full timeout with its prompt sent to /dev/null.
+    if ! HOME="$DEVBOX_CONFIG_HOME" timeout "$DEVBOX_UPDATE_TIMEOUT" "$bin" "$@" </dev/null >/dev/null 2>&1; then
+        printf '  %-7s %s\n' "$label" "update failed -- staying on ${before:-unknown}"
+        return 0
+    fi
+    after=$(bin_version "$bin")
+    if [ "$before" = "$after" ]; then printf '  %-7s %s\n' "$label" "${after:-unknown} (current)"
+    else printf '  %-7s %s\n' "$label" "${before:-unknown} -> ${after:-unknown}"; fi
+}
+update_binaries() {
+    if [ "$DEVBOX_UPDATE" = 0 ] || [ "$NO_UPDATE" = 1 ]; then
+        echo "updates: skipped"; return 0
+    fi
+    echo "updates:"
+    update_one claude "$DEVBOX_CLAUDE_BIN" update
+    [ "$DEVBOX_CODEX" != 0 ] && update_one codex "$DEVBOX_CODEX_BIN" update
+    update_one code "$DEVBOX_CODE_BIN" update
+    return 0
+}
+
 preflight() {
     local bad=0
+    local workdir; workdir=$(devbox_workdir)
     [ -x "$DEVBOX_CLAUDE_BIN" ] || { echo "  MISSING: claude at $DEVBOX_CLAUDE_BIN"; bad=1; }
-    [ -d "$DEVBOX_ROOT" ]       || { echo "  MISSING: session root $DEVBOX_ROOT"; bad=1; }
+    [ -d "$workdir" ]           || { echo "  MISSING: working directory $workdir"; bad=1; }
     [ -x "$DEVBOX_CODE_BIN" ]   || echo "  note: no code CLI at $DEVBOX_CODE_BIN -- the job runs, without a tunnel"
     # Codex, checked but never started from here. `codex remote-control start`
     # on a login node would bind ~/.codex/app-server-control/app-server-control.sock
@@ -67,19 +196,15 @@ preflight() {
     # Trust is the one thing that cannot be fixed from a batch job: a root whose
     # trust dialog has not been accepted (and persisted) blocks every job in the
     # chain, and $HOME can never persist it.
-    if [ "$DEVBOX_ROOT" = "$HOME" ]; then
-        echo "  FATAL: DEVBOX_ROOT must not be \$HOME -- home trust is session-only and never persists"; bad=1
-    elif [ -f "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
-        python3 - "$DEVBOX_ROOT" <<'PY' || bad=1
-import json,os,sys
-root=sys.argv[1]
-try: cfg=json.load(open(os.path.expanduser("~/.claude.json")))
-except Exception: sys.exit(0)
-if cfg.get("projects",{}).get(root,{}).get("hasTrustDialogAccepted") is not True:
-    print(f"  FATAL: workspace trust not accepted for {root}")
-    print(f"         run `cd {root} && claude` once, interactively, and accept it")
-    sys.exit(1)
-PY
+    # Delegated to active-project so there is one implementation of "is this
+    # trusted" and one of how to grant it -- and so the fix printed here is a
+    # single command rather than an interactive detour through `claude`.
+    if [ "$workdir" = "$HOME" ]; then
+        echo "  FATAL: the working directory must not be \$HOME -- home trust is session-only and never persists"; bad=1
+    elif ! "$DEVBOX_DIR/active-project" --trust-status "$workdir" >/dev/null 2>&1; then
+        echo "  FATAL: workspace trust not accepted for $workdir"
+        echo "         grant it with: active-project --trust $workdir"
+        bad=1
     fi
 
     # AGENTS.md reaches the portable rules through an absolute
@@ -90,22 +215,22 @@ PY
     # has nobody to answer it. It bit all three slots on killarney's first run.
     #
     # Unlike trust, this one is seedable: hasClaudeMdExternalIncludesApproved is
-    # a plain persisted boolean in ~/.claude.json's per-project entry, with no
+    # a plain persisted boolean in .claude.json's per-project entry, with no
     # home-directory special case and no settings.json or environment equivalent
     # (checked against 2.1.273 -- the dialog and /config are the only other ways
     # to set it). So set it here rather than make every new cluster rediscover it.
     #
     # Read-modify-write with an atomic rename, touching one key of one project
     # and no-oping when already true, because live agents write this file too.
-    if [ -f "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
-        python3 - "$DEVBOX_ROOT" <<'SEED'
+    if [ -f "$CLAUDE_CONFIG_DIR/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$workdir" "$CLAUDE_CONFIG_DIR/.claude.json" <<'SEED'
 import json, os, sys, tempfile
 root = sys.argv[1]
-path = os.path.expanduser("~/.claude.json")
+path = sys.argv[2]
 try:
     with open(path) as fh: cfg = json.load(fh)
 except Exception as e:
-    print(f"  note: could not read ~/.claude.json ({e}) -- external includes not seeded")
+    print(f"  note: could not read {path} ({e}) -- external includes not seeded")
     sys.exit(0)
 proj = cfg.setdefault("projects", {}).setdefault(root, {})
 if proj.get("hasClaudeMdExternalIncludesApproved") is True:
@@ -126,23 +251,83 @@ SEED
     return $bad
 }
 
+# Scanned rather than shifted off the front: `attach N` reads its slot from $2,
+# so consuming argv here would move it. --now is read by `restart`,
+# --no-update by `up` and `restart`.
+RESTART_NOW=0
+NO_UPDATE=0
+for _a in "$@"; do
+    case "$_a" in
+        --now)       RESTART_NOW=1 ;;
+        --no-update) NO_UPDATE=1 ;;
+    esac
+done
+
 case "${1:-up}" in
 up)
+    if [ "$DEVBOX_LOCAL" != 0 ]; then
+        if local_running; then
+            echo "already running: pid $(local_pid) on $(local_host)"
+            echo "use 'devbox-up restart' to apply changes"; exit 1
+        fi
+        update_binaries
+        preflight || { echo "refusing to start"; exit 1; }
+        start_local
+        exit 0
+    fi
     if [ -n "$(jobs_of '%i')" ]; then
         echo "already queued/running:"; jobs_of '  %i %T %L' ; echo "use 'devbox-up restart' to apply changes"; exit 1
     fi
+    update_binaries
     preflight || { echo "refusing to submit"; exit 1; }
     submit
     ;;
 restart)
+    update_binaries
+    if [ "$DEVBOX_LOCAL" != 0 ]; then
+        # No chain to preserve locally, so this really is stop-then-start: the
+        # running agents DO go away. That is what --now buys on the Slurm path,
+        # so here it is simply what restart already does -- accepted and ignored
+        # rather than rejected, so one documented command works on every cluster.
+        [ "$RESTART_NOW" = 1 ] && echo "--now: implied in local mode"
+        stop_local || exit 1
+        preflight || { echo "refusing to start"; exit 1; }
+        start_local
+        exit 0
+    fi
     # Cancel only the PENDING successor: the running job keeps your live agents.
     # Its own successor was queued at its start, so it must go or it will run the
     # old script.
     for j in $(jobs_of '%i' -t PENDING); do echo "cancelling pending $j"; scancel "$j"; done
     sleep 3; preflight || { echo "refusing to submit"; exit 1; }
     submit
+    if [ "$RESTART_NOW" = 1 ]; then
+        # Submit FIRST, cancel SECOND. --dependency=singleton holds the new job
+        # behind the old one, so by the time the old one dies the new one is
+        # already queued, eligible, and has been accruing age -- where cancelling
+        # first would leave the box down for a fresh trip through the scheduler.
+        # devbox.sh queues its successor at START, not on exit, so scancel here
+        # does not spawn one more job running the old script.
+        r=$(running_job)
+        if [ -n "$r" ]; then
+            echo "cancelling running $r -- every live agent slot, the codex daemon and the tunnel go with it"
+            scancel "$r"
+            echo "the replacement starts when the scheduler gives it the resources; watch 'devbox-up status'"
+        else
+            echo "--now: nothing running to cancel"
+        fi
+    else
+        # The gap this closes is invisible otherwise: restart looks like it
+        # applied, and the edit then sits unused for up to a full walltime.
+        left=$(jobs_of '%L' -t RUNNING | head -1)
+        [ -n "$left" ] && {
+            echo "note: the running box keeps the OLD script for up to $left (its remaining walltime)."
+            echo "      'devbox-up restart --now' takes it down now instead -- it kills the live agents."
+        }
+    fi
     ;;
 stop)
+    if [ "$DEVBOX_LOCAL" != 0 ]; then stop_local; exit $?; fi
     mkdir -p "$DEVBOX_STATE"; : > "$DEVBOX_STATE/stop"
     echo "stop file written: $DEVBOX_STATE/stop"
     scancel -u "$USER" -n "$DEVBOX_JOB_NAME" && echo "cancelled all $DEVBOX_JOB_NAME jobs"
@@ -150,14 +335,27 @@ stop)
     ;;
 status)
     echo "cluster : $DEVBOX_CLUSTER"
-    echo "jobs    :"; jobs_of '  %i %T %M/%L %N' || true
-    local_job=$(running_job)
+    wd=$(devbox_workdir)
+    if [ "$DEVBOX_LOCAL" != 0 ]; then
+        echo "mode    : local"
+        if local_running; then echo "process : pid $(local_pid) on $(local_host)"
+        elif [ -n "$(local_pid)" ]; then echo "process : recorded on $(local_host), not running here"
+        else echo "process : not running"; fi
+        local_job=""
+    else
+        echo "mode    : slurm job"
+        echo "jobs    :"; jobs_of '  %i %T %M/%L %N' || true
+        local_job=$(running_job)
+    fi
+    # Read from the project's own slot set: with ids keyed by (project, slot),
+    # the flat $DEVBOX_STATE path would show a different project's pins.
+    sdir=$(devbox_slot_dir "$wd")
     echo "slots   :"
     for s in $DEVBOX_SLOTS; do
-        f="$DEVBOX_STATE/session-id-$s"
+        f="$sdir/session-id-$s"
         printf '  %-18s %s\n' "$DEVBOX_NAME-$s" "$(cat "$f" 2>/dev/null || echo '(not yet started)')"
     done
-    echo "project : $("$DEVBOX_DIR/active-project" 2>/dev/null || echo '(none set -- run: active-project <dir>)')"
+    echo "project : $("$DEVBOX_DIR/active-project" 2>/dev/null || echo "(none set -- using $DEVBOX_ROOT; set with: active-project <dir>)")"
     echo "tunnel  : https://vscode.dev/tunnel/$DEVBOX_NAME"
     # Read back what the job itself logged rather than asking codex anything:
     # the daemon's own `version` query reports liveness but not whether the
@@ -165,20 +363,43 @@ status)
     # job's daemon over the shared control socket (see preflight). At most one
     # watchdog period (5 min) stale, and it carries the failure text verbatim.
     if [ "$DEVBOX_CODEX" != 0 ]; then
-        if [ -z "$local_job" ]; then
-            echo "codex   : (no running job)"
+        # Read back what the box itself logged. Which file that is depends on
+        # the mode: a job writes one per job id, a local box one per host.
+        if [ "$DEVBOX_LOCAL" != 0 ]; then
+            if local_running; then
+                codex_log="$DEVBOX_LOG_DIR/$DEVBOX_JOB_NAME-local-$(local_host).out"
+            else codex_log=""; fi
+        elif [ -n "$local_job" ]; then
+            codex_log="$DEVBOX_LOG_DIR/$DEVBOX_JOB_NAME-$local_job.out"
+        else codex_log=""; fi
+        if [ -z "$codex_log" ]; then
+            echo "codex   : (box not running)"
         else
-            codex_line=$(grep '^codex: ' "$DEVBOX_LOG_DIR/$DEVBOX_JOB_NAME-$local_job.out" 2>/dev/null | tail -1)
-            echo "codex   : ${codex_line:-(nothing logged yet -- this job predates codex; 'devbox-up restart' applies it to the next one)}"
+            codex_line=$(grep '^codex: ' "$codex_log" 2>/dev/null | tail -1)
+            echo "codex   : ${codex_line:-(nothing logged yet -- restart applies codex to the next run)}"
         fi
     fi
-    [ -n "$local_job" ] && {
-        echo "windows :"
-        srun --jobid="$local_job" --overlap tmux list-windows -t claude \
-             -F '  #{window_name} [#{pane_current_command}]' 2>/dev/null
-    }
+    if [ "$DEVBOX_LOCAL" != 0 ]; then
+        # No srun indirection locally: the tmux server is on this machine and
+        # /tmp is not job-private, so the socket is simply reachable.
+        tmux has-session -t claude 2>/dev/null && {
+            echo "windows :"
+            tmux list-windows -t claude -F '  #{window_name} [#{pane_current_command}]'
+        }
+    else
+        [ -n "$local_job" ] && {
+            echo "windows :"
+            srun --jobid="$local_job" --overlap tmux list-windows -t claude \
+                 -F '  #{window_name} [#{pane_current_command}]' 2>/dev/null
+        }
+    fi
     ;;
 attach)
+    if [ "$DEVBOX_LOCAL" != 0 ]; then
+        tmux has-session -t claude 2>/dev/null || { echo "no tmux session 'claude' here"; exit 1; }
+        if [ -n "${2:-}" ]; then exec tmux attach -t "claude:agent$2"
+        else exec tmux attach -t claude; fi
+    fi
     j=$(running_job); [ -n "$j" ] || { echo "no running $DEVBOX_JOB_NAME job"; exit 1; }
     # --overlap is required, or the step blocks waiting on the batch step's
     # resources. `ssh <node>` cannot see the socket where /tmp is job-private.
@@ -187,17 +408,23 @@ attach)
     ;;
 config)
     echo "cluster     : $DEVBOX_CLUSTER"
-    echo "root        : $DEVBOX_ROOT"
+    echo "mode        : $([ "$DEVBOX_LOCAL" != 0 ] && echo "local (no Slurm job)" || echo 'slurm job')"
+    echo "workdir     : $(devbox_workdir)   <- agents start here"
+    echo "root        : $DEVBOX_ROOT (fallback when no active project)"
+    echo "config home : $DEVBOX_CONFIG_HOME (claude=$DEVBOX_CLAUDE_CONFIG_DIR)"
     echo "slots       : $DEVBOX_SLOTS"
     echo "name        : $DEVBOX_NAME (tunnel), $DEVBOX_NAME-<slot> (remote control)"
     # No name of ours here: codex reports gethostname() to the app, so the box
     # shows up under the current node name and changes on every hop. The
     # environment behind it is stable, which is what actually matters.
     echo "codex       : $([ "$DEVBOX_CODEX" != 0 ] && echo "on ($DEVBOX_CODEX_BIN), app shows the node's hostname" || echo 'off (DEVBOX_CODEX=0)')"
+    echo "updates     : $([ "$DEVBOX_UPDATE" = 0 ] && echo 'off (DEVBOX_UPDATE=0)' || echo 'on at up/restart')"
+    echo "  claude    : $(bin_version "$DEVBOX_CLAUDE_BIN") ($DEVBOX_CLAUDE_BIN)"
+    [ "$DEVBOX_CODEX" != 0 ] && echo "  codex     : $(bin_version "$DEVBOX_CODEX_BIN")"
     echo "state       : $DEVBOX_STATE"
     echo "submit from : $DEVBOX_SUBMIT_DIR"
     echo "project     : $("$DEVBOX_DIR/active-project" 2>/dev/null || echo '(none set)')"
-    echo "sbatch flags:"; devbox_sbatch_flags | sed 's/^/  /'
+    [ "$DEVBOX_LOCAL" != 0 ] || { echo "sbatch flags:"; devbox_sbatch_flags | sed 's/^/  /'; }
     echo "preflight   :"; preflight && echo "  ok"
     ;;
 *)
