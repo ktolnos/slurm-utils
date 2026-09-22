@@ -12,6 +12,11 @@
 # tunnel, nothing else. Never run training, inference or a test suite in it --
 # a vLLM import alone will exceed the memory cap and get the job OOM-killed,
 # which takes down every agent AND the tunnel at once.
+#
+# In local mode (DEVBOX_LOCAL, for a site whose login node is meant to be used
+# directly and is not Slurm compute) there is no cgroup and so no cap: the same
+# rule holds, but nothing enforces it and the damage lands on everyone else
+# using that machine rather than on this job.
 
 # Where devbox/ actually lives. NOT $BASH_SOURCE: sbatch copies the script into
 # the node's spool directory and runs that copy, so inside a job $BASH_SOURCE is
@@ -52,9 +57,11 @@ source "$DEVBOX_DIR/config.sh"
 unset TMUX TMUX_PANE
 
 SCRIPT="$DEVBOX_DIR/devbox.sh"
-REPO="$DEVBOX_ROOT"
 STOP_FILE="$DEVBOX_STATE/stop"
-TUNNEL_LOG="$DEVBOX_LOG_DIR/tunnel-${SLURM_JOB_ID}.log"
+# Names the log files. Outside Slurm there is no job id, and every run would
+# otherwise share one "tunnel-.log" and interleave into it.
+RUN_ID="${SLURM_JOB_ID:-local-$(hostname -s)-$$}"
+TUNNEL_LOG="$DEVBOX_LOG_DIR/tunnel-$RUN_ID.log"
 
 # A login shell's .bashrc may override `cd` with a function that returns some
 # other command's exit status (a venv `activate`, say), which makes `cd x && y`
@@ -62,20 +69,72 @@ TUNNEL_LOG="$DEVBOX_LOG_DIR/tunnel-${SLURM_JOB_ID}.log"
 source "$HOME/.bashrc" 2>/dev/null
 
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
+
+# Every piece of durable agent state, pointed at whatever filesystem this
+# cluster keeps it on -- $HOME by default, shared storage where $HOME is
+# node-local. Exported AFTER sourcing .bashrc so config.sh wins over whatever
+# the shell profile happens to set.
+#
+# CLAUDE_CONFIG_DIR is the load-bearing one: it carries .claude.json, and so
+# workspace trust and the history that every --resume depends on. Get it wrong
+# on a node-local-$HOME site and the box comes up with three slots parked on a
+# trust dialog and every pinned conversation silently replaced by an empty one.
+export CLAUDE_CONFIG_DIR="$DEVBOX_CLAUDE_CONFIG_DIR"
+export CODEX_HOME="$DEVBOX_CODEX_HOME"
 # Both keychain vars are load-bearing: without them `code tunnel user show`
 # reports logged in on the login node and not logged in on every compute node.
-# Cost: ~/.vscode-cli/token.json holds the GitHub token in plaintext (0600).
+# Cost: $VSCODE_CLI_DATA_DIR/token.json holds the GitHub token in plaintext (0600).
 export VSCODE_CLI_USE_FILE_KEYCHAIN=1 VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT=1
-export VSCODE_CLI_DATA_DIR="$HOME/.vscode-cli" VSCODE_CLI_NONINTERACTIVE=1
+export VSCODE_CLI_DATA_DIR="$DEVBOX_VSCODE_DATA_DIR" VSCODE_CLI_NONINTERACTIVE=1
+
+# --- where the agents work ----------------------------------------------------
+# The agents start IN the active project. Claude Code keys both workspace trust
+# and conversation history to the working directory, so that one path decides
+# which conversations resume and whether the slots come up at all -- which is
+# why active-project grants trust when it is set rather than leaving it to a
+# dialog nobody is here to answer. DEVBOX_ROOT is now only the fallback for
+# when no project has been named.
+ACTIVE_PROJECT="$("$DEVBOX_DIR/active-project" 2>/dev/null)"
+WORKDIR="${ACTIVE_PROJECT:-$DEVBOX_ROOT}"
+if [ ! -d "$WORKDIR" ]; then
+    echo "active project '$WORKDIR' is not a directory -- falling back to $DEVBOX_ROOT"
+    WORKDIR="$DEVBOX_ROOT"
+fi
+
+# Slot ids are keyed by (project, slot), not by slot alone. History lives under
+# the working directory, so a pinned id only resolves inside the project it was
+# minted in: with one flat set, switching projects would hand --resume an id
+# whose transcript is under the old path, and the slot would come up in a fresh
+# empty conversation wearing a used id. Per project, switching away and back
+# resumes that project's own conversations instead.
+slot_dir() {
+    printf '%s/projects/%s\n' "$DEVBOX_STATE" "$(printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g')"
+}
+SLOT_DIR="$(slot_dir "$WORKDIR")"
+mkdir -p "$SLOT_DIR"
 
 mkdir -p "$DEVBOX_STATE" "$DEVBOX_LOG_DIR"
-echo "=== $DEVBOX_JOB_NAME job $SLURM_JOB_ID on $(hostname) ($DEVBOX_CLUSTER) at $(date) ==="
-echo "    root=$REPO  slots=[$DEVBOX_SLOTS]  name=$DEVBOX_NAME  state=$DEVBOX_STATE"
+if [ "$DEVBOX_LOCAL" != 0 ]; then
+    echo "=== $DEVBOX_JOB_NAME local on $(hostname) ($DEVBOX_CLUSTER) at $(date) ==="
+    # Claimed here, not by devbox-up: `setsid nohup ... &` reports the pid of a
+    # process that may already have forked away, so $! there is not reliably
+    # this box. Written with the hostname because a bare pid checked from
+    # another node would match some unrelated process.
+    printf '%s %s\n' "$$" "$(hostname -s)" > "$DEVBOX_STATE/local.pid"
+else
+    echo "=== $DEVBOX_JOB_NAME job $SLURM_JOB_ID on $(hostname) ($DEVBOX_CLUSTER) at $(date) ==="
+fi
+echo "    project=$WORKDIR  slots=[$DEVBOX_SLOTS]  name=$DEVBOX_NAME"
+echo "    state=$SLOT_DIR  config=$CLAUDE_CONFIG_DIR"
 
 # Queue the successor NOW: survives node failure, OOM and scancel, and accrues
 # queue age. A USR1 trap would not fire in any of those cases. Resubmitting from
 # $SCRIPT means a `git pull` in this repo reaches every cluster's next job.
-if [ -e "$STOP_FILE" ]; then
+if [ "$DEVBOX_LOCAL" != 0 ]; then
+    # Nothing to chain to: a local box has no walltime to be evicted by, so it
+    # runs until the machine reboots or someone stops it.
+    echo "local mode -- no successor queued"
+elif [ -e "$STOP_FILE" ]; then
     echo "stop file present ($STOP_FILE) -- not chaining"
 else
     mapfile -t FLAGS < <(devbox_sbatch_flags)
@@ -84,14 +143,14 @@ fi
 
 tmux has-session -t claude 2>/dev/null && tmux kill-session -t claude
 
-HIST_DIR="$HOME/.claude/projects/$(echo "$REPO" | sed 's/[^A-Za-z0-9]/-/g')"
+HIST_DIR="$CLAUDE_CONFIG_DIR/projects/$(echo "$WORKDIR" | sed 's/[^A-Za-z0-9]/-/g')"
 
 # Pin one conversation per slot, minted once and then kept forever:
 # --resume needs the id to exist, --session-id needs it not to. A slot whose id
 # has never been used yet keeps its uuid and starts it -- do not re-mint, or the
 # "persistent uuid" promise breaks on the first restart before you used the slot.
 session_arg() {
-    local f="$DEVBOX_STATE/session-id-$1" id
+    local f="$SLOT_DIR/session-id-$1" id
     id=$(cat "$f" 2>/dev/null)
     if [ -z "$id" ]; then
         id=$(uuidgen); printf '%s\n' "$id" > "$f"; chmod 600 "$f"
@@ -110,7 +169,7 @@ start_tmux() {
     local i
     for i in $(seq 1 10); do
         tmux has-session -t claude 2>/dev/null && return 0
-        tmux new-session -d -s claude -n "agent$(set -- $DEVBOX_SLOTS; echo "$1")" -c "$REPO"
+        tmux new-session -d -s claude -n "agent$(set -- $DEVBOX_SLOTS; echo "$1")" -c "$WORKDIR"
         tmux has-session -t claude 2>/dev/null && return 0
         sleep 3
     done
@@ -121,32 +180,35 @@ start_tmux() {
 # survives the trip through tmux send-keys, and skipped when absent so a
 # cluster's stanza can name a tree that only some nodes mount.
 ADD_DIRS=""
-# The active project comes along automatically: it is where the work is, and an
-# agent that cannot read it is useless. Harmless when it already sits inside one
-# of the configured trees -- the loop below skips duplicates and missing paths.
-ACTIVE_PROJECT="$("$DEVBOX_DIR/active-project" 2>/dev/null)"
-for d in $DEVBOX_ADD_DIRS $ACTIVE_PROJECT; do
-    [ "$d" = "$REPO" ] && continue          # the root is already implicit
+# The project no longer needs naming here -- it is the working directory, so it
+# is implicit. What does need naming is everything OUTSIDE it: $HOME, this
+# cluster's shared trees, and DEVBOX_ROOT, so the devbox's own scripts and docs
+# stay readable from whichever project the agents are working in.
+for d in $DEVBOX_ADD_DIRS "$DEVBOX_ROOT"; do
+    [ "$d" = "$WORKDIR" ] && continue       # the working directory is implicit
     [ -d "$d" ] || { echo "add-dir: skipping $d (not a directory)"; continue; }
     case "$ADD_DIRS" in *"--add-dir '$d'"*) continue ;; esac   # named twice
     ADD_DIRS="$ADD_DIRS --add-dir '$d'"
 done
 echo "    add-dir:$ADD_DIRS"
-echo "    project:${ACTIVE_PROJECT:- (none set -- run 'active-project <dir>')}"
+[ -n "$ACTIVE_PROJECT" ] || \
+    echo "    project: none set -- run 'active-project <dir>'; using $DEVBOX_ROOT"
 
 declare -A LAST_LAUNCH
 launch_agent() {
     local slot=$1 win="agent$1" arg
     arg=$(session_arg "$slot")
     tmux list-windows -t claude -F '#{window_name}' | grep -qx "$win" \
-        || tmux new-window -t claude -n "$win" -c "$REPO"
+        || tmux new-window -t claude -n "$win" -c "$WORKDIR"
     # cd explicitly: the window's shell sources .bashrc, which may cd elsewhere,
-    # and the agent must start in $REPO or it opens a different history (history
-    # is keyed by absolute path) and an untrusted workspace.
-    # DEVBOX_SLOT/DEVBOX_STATE tell the SessionStart pin hook which slot file to
-    # update when /clear or /resume changes the conversation id underneath us.
+    # and the agent must start in $WORKDIR or it opens a different history
+    # (history is keyed by absolute path) and an untrusted workspace.
+    # DEVBOX_SLOT/DEVBOX_SLOT_DIR tell the SessionStart pin hook which slot file
+    # to update when /clear or /resume changes the conversation id underneath
+    # us; DEVBOX_SLOT_DIR is per project, so a pin never lands in another
+    # project's set. DEVBOX_STATE still goes through for pins.log.
     tmux send-keys -t "claude:$win" \
-        "cd '$REPO'; DEVBOX_SLOT=$slot DEVBOX_STATE='$DEVBOX_STATE' '$DEVBOX_CLAUDE_BIN' --remote-control $DEVBOX_NAME-$slot $arg$ADD_DIRS --autocompact $DEVBOX_AUTOCOMPACT" C-m
+        "cd '$WORKDIR'; DEVBOX_SLOT=$slot DEVBOX_STATE='$DEVBOX_STATE' DEVBOX_SLOT_DIR='$SLOT_DIR' '$DEVBOX_CLAUDE_BIN' --remote-control $DEVBOX_NAME-$slot $arg$ADD_DIRS --autocompact $DEVBOX_AUTOCOMPACT" C-m
     LAST_LAUNCH[$slot]=$SECONDS
     echo "slot $slot: $DEVBOX_NAME-$slot  $arg"
 }
@@ -156,7 +218,7 @@ launch_tunnel() {
     [ -x "$DEVBOX_CODE_BIN" ] || { echo "tunnel: no code CLI at $DEVBOX_CODE_BIN -- skipping"; return 1; }
     "$DEVBOX_CODE_BIN" tunnel user show 2>&1 | grep -qi "logged in with" || {
         echo "tunnel: code CLI not authenticated on this node -- skipping"; return 1; }
-    rm -f "$HOME/.vscode-cli/tunnel-stable.lock"   # stale lock from a killed job
+    rm -f "$VSCODE_CLI_DATA_DIR/tunnel-stable.lock"   # stale lock from a killed job
     tmux list-windows -t claude -F '#{window_name}' | grep -qx tunnel \
         || tmux new-window -t claude -n tunnel -c "$HOME"
     # cd first: the folder the shell is in becomes the default folder in the
@@ -165,7 +227,7 @@ launch_tunnel() {
     # hundreds of MB in under a minute. Hence the guard above and the
     # truncation below.
     tmux send-keys -t claude:tunnel \
-        "cd '$REPO'; '$DEVBOX_CODE_BIN' tunnel --accept-server-license-terms --name $DEVBOX_NAME >> '$TUNNEL_LOG' 2>&1" C-m
+        "cd '$WORKDIR'; '$DEVBOX_CODE_BIN' tunnel --accept-server-license-terms --name $DEVBOX_NAME >> '$TUNNEL_LOG' 2>&1" C-m
 }
 
 # Codex remote control. Deliberately NOT a tmux window: `remote-control start`

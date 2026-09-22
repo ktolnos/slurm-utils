@@ -26,24 +26,29 @@ devbox-up config     # resolved config + the exact sbatch flags
 | `SETUP_INSTRUCTIONS.md` | step-by-step for a new cluster, written for an agent |
 | `AGENTS.shared.md` | portable cluster rules, imported by each cluster's `AGENTS.md` |
 | `AGENTS.template.md` | skeleton for a new cluster's `AGENTS.md`, with the blanks marked |
-| `clusters/<cluster>/AGENTS.md` | that cluster's real rules, **symlinked** into its session root |
-| `settings.json` | both `SessionStart` hooks, symlinked into every root's `.claude/` |
+| `clusters/<cluster>/AGENTS.md` | that cluster's real rules, imported from user-level `CLAUDE.md` |
+| `settings.json` | the `SessionStart` hooks, as a reference copy — install them at user level |
 
-Defaults: root `~/devbox` with `--add-dir $HOME`, tunnel `<cluster>-dev`,
+Defaults: agents start in the active project (falling back to `DEVBOX_ROOT`,
+`~/devbox`) with `--add-dir $HOME`, tunnel `<cluster>-dev`,
 3 slots, codex remote control on, 2 cores / 6 GB / no GPU, 3-day walltime,
 account from `$SBATCH_ACCOUNT`. Override any of them from the environment
 (`DEVBOX_SLOTS="1 2" devbox-up`) or in `config.sh`, whose per-cluster `case`
 runs before the defaults — precedence is `environment > stanza > default`.
 
 Where the work is **not** under `$HOME` — repos on `/project`, outputs on
-`/scratch` — set `DEVBOX_ADD_DIRS` to the trees the agents need. The root is
-implicit and the default list is `$HOME` alone, so an otherwise healthy box
-comes up with agents that cannot read the repo they exist to work on.
+`/scratch` — set `DEVBOX_ADD_DIRS` to the trees the agents need *besides* the
+project they start in, which is implicit.
 
-The root does not have to be `~/devbox`. Pointing `DEVBOX_ROOT` at a project
-repo you already trust skips the interactive trust step entirely and keeps any
-pre-devbox conversation resumable — at the cost of two symlinks inside that
-repo, which is what `.gitignore` is for. Killarney's stanza does exactly this.
+Two settings matter most on an unusual site:
+
+- **`DEVBOX_CONFIG_HOME`** — where Claude's config and history, the tunnel
+  token and the codex enrollment live. Defaults to `$HOME`; point it at shared
+  storage wherever `$HOME` is node-local, or none of that survives a node hop.
+- **`DEVBOX_LOCAL`** — run the box as a plain background process instead of a
+  Slurm job. For a site whose login node is meant to be used directly and is
+  not itself Slurm compute: there is no walltime to escape, so the chaining
+  buys nothing and a job would only add a queue and a node hop.
 
 ## Porting to a new cluster
 
@@ -55,18 +60,19 @@ Most of this needs nothing: the cluster name comes from `$CC_CLUSTER` (or
 `scontrol`), every name and path derives from it, and the sbatch flags are
 built in one function. In practice:
 
-1. `git clone` this repo into `$HOME` and put `devbox/` on your `PATH` (or call
-   `~/slurm-utils/devbox/devbox-up` directly).
-2. Install the two binaries (step 1 below) and authenticate them (step 3).
-3. `mkdir ~/devbox`, then **run `claude` there once, interactively, and accept
-   the trust dialog.** This is the one step that cannot be automated -- see the
-   home-trust section -- and `devbox-up` refuses to submit without it.
-4. Symlink the pin hook: `<root>/.claude/settings.json` -> `devbox/settings.json`.
-5. Fill in `clusters/<cluster>/AGENTS.md` from `AGENTS.template.md` and symlink
-   it to `<root>/AGENTS.md`; the portable rules arrive by importing
-   `AGENTS.shared.md` through an **absolute** `@~/slurm-utils/...` path, which a
-   file read through a symlink needs.
-6. `devbox-up config` to see what it resolved, then `devbox-up`.
+1. `git clone` this repo somewhere every node can read it and put `devbox/` on
+   your `PATH` (`slurm_utils.sh` does it, from its own location).
+2. Install the binaries (step 2 below) and authenticate them (step 3) — the
+   one part that genuinely needs a human.
+3. Check whether `$HOME` is shared with the compute nodes. If not, set
+   `DEVBOX_CONFIG_HOME` and move `~/.claude` there; everything else follows.
+4. `active-project <dir>` — the agents start there, and this grants workspace
+   trust as part of the move, so there is no interactive dialog to answer.
+5. Install the three hooks at user level in `$CLAUDE_CONFIG_DIR/settings.json`.
+6. Fill in `clusters/<cluster>/AGENTS.md` from `AGENTS.template.md` and import
+   it from `$CLAUDE_CONFIG_DIR/CLAUDE.md`, with the shared rules reached by an
+   **absolute** `@/path/to/devbox/AGENTS.shared.md`.
+7. `devbox-up config` to see what it resolved, then `devbox-up`.
 
 Add a stanza to the `case` in `config.sh` only for what a cluster genuinely
 gets wrong. From two clusters so far that is: the account, the walltime,
@@ -96,10 +102,11 @@ only part, so anything in there is read by every agent on every request and is
 addressed to them, not to you. (An earlier version carried 21 lines of "import
 this, don't copy it" preamble, about 17% of the file, aimed at whoever edits it.)
 
-- **Import it, never copy it**, with an absolute `~/` path:
-  `@~/slurm-utils/devbox/AGENTS.shared.md`. A cluster's `AGENTS.md` is read
-  through a symlink from the session root, so a relative path resolves against
-  whichever directory the reader arrived by, not against this repo — and an
+- **Import it, never copy it**, with a fully absolute path:
+  `@/path/to/devbox/AGENTS.shared.md` — not relative, and not `@~/...`, since
+  `~` is a different filesystem per node wherever `$HOME` is node-local. A
+  relative path resolves against whichever directory the session started in,
+  which is now whichever project is active, not against this repo — and an
   `@`-import that resolves to nothing **fails silently**: no dialog, no error,
   the rules simply absent.
 - **An absolute path is an external include**, gated per root by
@@ -116,13 +123,19 @@ non-expansion.
 
 ## The active project
 
-The session root cannot be the project you are working on: it is fixed by
-workspace trust and by conversation history being keyed to an absolute path. So
-the agents live in `~/devbox` while the work lives somewhere else — and because
-`/clear` starts a conversation with no memory of the last one, every clear used
-to mean telling each slot again where the work is.
+The agents start **in** the active project: it is each slot's working
+directory, and so what Claude Code treats as the session root. Workspace trust
+and conversation history are both keyed to that path, which is why
+`active-project` grants trust as part of setting it, and why slot ids are
+stored per `(project, slot)` — switching projects gives that project its own
+three conversations, and switching back resumes them rather than stranding
+them under a path whose history no longer matches.
 
-One pointer fixes that, per cluster:
+A running slot cannot change its own working directory, so repointing does not
+move live agents however many times you `/clear`; they follow on the next
+`devbox-up restart`.
+
+One pointer, per cluster:
 
 ```bash
 active-project ~/my-repo     # set it
@@ -177,11 +190,11 @@ Each slot's uuid is minted once and then kept forever, so the same three
 conversations come back across `/clear`, node hops and the 3-day chain. Pick one
 from any device by its Remote Control name.
 
-**All three share the root `~/devbox`** (plus `--add-dir $HOME`). That is not a
-simplification -- it is the only directory whose workspace trust is persisted
-(see the home-trust section below), so giving each slot its own root would mean
-answering a trust dialog per slot, per job, forever. The trade-off is that the
-three agents work in one tree and can collide; `AGENTS.md` tells them so.
+**All three start in the active project** (plus `--add-dir $HOME` and this
+cluster's shared trees). The trade-off is that the three agents work in one
+tree and can collide; `AGENTS.md` tells them so. Their conversations are keyed
+per `(project, slot)`, so the set you come back to is the set that belongs to
+the project you are in.
 
 Slot 1 was the original single-agent devbox: its id file was migrated into
 `~/.devbox/fir/session-id-1` and its Remote Control name went from `fir-dev` to
@@ -497,11 +510,12 @@ Two consequences for a devbox, which is why the root moved:
 2. Persisted trust also gates project-scoped settings, hooks and MCP servers.
    A home-rooted session silently drops them ("workspace not yet trusted").
 
-The fix is the current config: root at `~/devbox` (trusted once, persisted) and
-pull the rest of home in with `--add-dir $HOME`. Roaming still works, nothing
-re-prompts. `devbox-up` preflights this by reading `hasTrustDialogAccepted` for
-`$DEVBOX_ROOT` out of `~/.claude.json`, so a new cluster fails fast with
-instructions instead of hanging on a dialog nobody can see. If you ever move the
+The fix is to start in a real project directory, never `$HOME`, and pull home
+in with `--add-dir $HOME`. Roaming still works, nothing re-prompts.
+`active-project` grants and persists that trust when you name the project, and
+`devbox-up` preflights it by reading `hasTrustDialogAccepted` out of
+`$CLAUDE_CONFIG_DIR/.claude.json`, so a new cluster fails fast with a one-line
+fix instead of hanging on a dialog nobody can see. If you ever move the
 root, the history key moves with it
 (`~/.claude/projects/<root with non-alphanumerics replaced by ->`), so clear
 `~/.devbox/<cluster>/session-id-*` at the same time or the slots resume
@@ -524,15 +538,16 @@ everywhere else (any session without that variable). Every pin it writes is
 logged to `~/.devbox/<cluster>/pins.log`.
 
 The script alone does nothing -- what activates it is the entry in
-`~/devbox/.claude/settings.json`:
+`$CLAUDE_CONFIG_DIR/settings.json` (user level, so it covers every project the
+agents are pointed at rather than needing a copy in each):
 
 ```json
 {"hooks":{"SessionStart":[{"hooks":[
-   {"type":"command","command":"$HOME/slurm-utils/devbox/pin-session"}]}]}}
+   {"type":"command","command":"<devbox>/pin-session"}]}]}}
 ```
 
-Confirm with `cat ~/devbox/.claude/settings.json`; if that file is absent the
-hook is not installed and the pins are only as fresh as the last job launch.
+Confirm with `cat $CLAUDE_CONFIG_DIR/settings.json`; if the entry is absent the
+hook is not installed and the pins are only as fresh as the last launch.
 
 Without that hook, re-pin by hand after a `/clear`:
 
@@ -589,11 +604,12 @@ are unaffected -- but `--export=ALL` would have handed the same poisoned `$TMUX`
 to every job in the chain, so one restart from a pane breaks the box forever.
 `devbox.sh` and `devbox-up submit` both `unset TMUX TMUX_PANE`.
 
-### `@`-imports in `AGENTS.md` need a one-time approval per root
+### `@`-imports in `AGENTS.md` need a one-time approval per project
 
-`AGENTS.md` pulls in the shared rules with an absolute
-`@~/slurm-utils/devbox/AGENTS.shared.md`, which has to be absolute because the
-file is read through a symlink -- but a path outside the root is an *external*
+The cluster rules pull in the shared ones with an absolute
+`@/path/to/devbox/AGENTS.shared.md`, which has to be absolute so that it
+resolves the same from every project and every node -- but a path outside the
+working directory is an *external*
 include, and Claude Code gates those behind a dialog:
 
 ```
@@ -641,8 +657,10 @@ too. A new cluster never meets the dialog.
   in the chain. Never run two agents on the same conversation. With three slots
   rooted in the same directory this is no longer a theoretical risk: all three
   would resolve `--continue` to the same conversation and fight over it.
-- **History is keyed by absolute path.** `/home/eop/devbox` here -- not through
-  a symlink, and not `~/devbox` expanded somewhere else.
+- **History is keyed by absolute path** -- the working directory's, resolved,
+  not through a symlink and not a `~` expanded somewhere else. That is exactly
+  why slot ids are stored per project: the same id means a different
+  conversation under a different path.
 - **Set `--autocompact` explicitly** (we run `500k`). Takes `auto` or 100k-1M;
   anything else is a parse error, so a typo fails loudly.
 - **Name the Remote Control session** (`--remote-control fir-dev`); auto names

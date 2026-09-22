@@ -1,37 +1,37 @@
 # Template: a new cluster's AGENTS.md
 
 Copy this into `clusters/<cluster>/AGENTS.md` — in this repo, in git — and
-symlink it into the devbox session root. It lives here rather than in the root
-so there is one copy: a copy in the root drifts from this repo silently, and
-where the root is a project repo it would also be a second place the same
-cluster facts are written down. Everything portable is imported, so this file
-should stay short — if a section here has no cluster-specific number or name in
-it, it probably belongs in `AGENTS.shared.md` instead.
+import it from user-level memory. It lives here rather than in a project so
+there is one copy: a copy per project drifts silently, and the agents move
+between projects, so there is no one directory to put it in any more.
 
 ```bash
-ROOT=$(devbox-up config | awk '/^root/{print $3}')
-mkdir -p ~/slurm-utils/devbox/clusters/$CC_CLUSTER
-cp ~/slurm-utils/devbox/AGENTS.template.md ~/slurm-utils/devbox/clusters/$CC_CLUSTER/AGENTS.md
-# edit the TODOs, then:
-ln -sfn ~/slurm-utils/devbox/clusters/$CC_CLUSTER/AGENTS.md "$ROOT/AGENTS.md"
-head -40 "$ROOT/AGENTS.md"      # verify it reads through the symlink
+mkdir -p "$DEVBOX_DIR/clusters/<cluster>"
+cp "$DEVBOX_DIR/AGENTS.template.md" "$DEVBOX_DIR/clusters/<cluster>/AGENTS.md"
+# edit the TODOs, then wire it into every session on this cluster:
+echo "@$DEVBOX_DIR/clusters/<cluster>/AGENTS.md" >> "$CLAUDE_CONFIG_DIR/CLAUDE.md"
 ```
 
-Claude Code reads `CLAUDE.md` by default, so the root also needs a `CLAUDE.md`
-that imports this file. Two files rather than one keeps the name working for
-both Claude Code and other agents:
+`$CLAUDE_CONFIG_DIR/CLAUDE.md` is user-level memory, so it is read in every
+session whatever directory it starts in — which is what makes this work when
+the working directory is whichever project is active. Everything portable is
+imported, so this file should stay short: if a section here has no
+cluster-specific number or name in it, it probably belongs in
+`AGENTS.shared.md` instead.
 
-```bash
-echo '@AGENTS.md' > "$ROOT/CLAUDE.md"   # or add that line to an existing CLAUDE.md
+Import the shared rules from inside the file with an **absolute** path:
+
+```
+@/abs/path/to/devbox/AGENTS.shared.md
 ```
 
-Both must be reachable **inside the session root**, because that is the
-directory whose trust is persisted and whose project settings are honoured — a
-file in `$HOME` is not read as project instructions. The symlink satisfies that;
-its target does not have to be in the root.
+Never `@~/...`. On a cluster whose `$HOME` is node-local, `~` resolves to a
+different filesystem depending on which node is reading it.
 
-Where the root is an existing project repo, git-ignore the symlink and add
-`@AGENTS.md` to that repo's own `CLAUDE.md` rather than overwriting it.
+Absolute imports count as **external** includes, which have a one-time
+per-project dialog attached. `active-project` and `devbox-up` preflight both
+approve it, so there is nothing to do — it is noted only because the symptom
+(every slot parked on "Yes, allow external imports") looks like a clean start.
 
 Delete everything above the line when you copy it.
 

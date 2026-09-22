@@ -7,8 +7,10 @@ through it in order; each step says how to verify it before moving on. Expect
 **Read `README.md` first** if you need to know what any of this is for. This
 file is the procedure; that one is the explanation.
 
-**Two steps need a human** and cannot be worked around, so surface them early
-rather than at the end (step 3 and step 5). Ask for both at once.
+**One step needs a human** and cannot be worked around: step 3, the account
+logins. Surface it early rather than at the end. (Accepting the workspace-trust
+dialog used to be a second such step; `active-project` now grants trust
+directly, so it is not.)
 
 ---
 
@@ -34,14 +36,20 @@ hard-fails. Set `DEVBOX_CLUSTER` explicitly instead of working around it.
 git clone https://github.com/ktolnos/slurm-utils.git ~/slurm-utils
 grep -q 'slurm_utils.sh' ~/.bashrc || echo 'source ~/slurm-utils/slurm_utils.sh' >> ~/.bashrc
 source ~/slurm-utils/slurm_utils.sh
-command -v devbox-up            # -> ~/slurm-utils/devbox/devbox-up
+command -v devbox-up            # -> <checkout>/devbox/devbox-up
 ```
 
-`slurm_utils.sh` adds `devbox/` to `PATH`, so nothing else needs installing.
+`slurm_utils.sh` adds `devbox/` to `PATH`, derived from its own location, so
+the checkout does not have to be `~/slurm-utils` — and on a cluster with a
+node-local `$HOME` (step 4) it must not be: clone it onto shared storage and
+source it from there instead.
 
 ## 2. Install the three binaries (on the login node)
 
-All are self-contained; no node or npm needed.
+All are self-contained; no node or npm needed. Install them under
+`$DEVBOX_CONFIG_HOME` rather than `$HOME` if step 4 says `$HOME` is node-local
+-- a binary in a node-local `$HOME` does not exist on the compute node, and
+`HOME=<shared> curl ... | sh` is enough to redirect an installer that insists.
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash          # -> ~/.local/bin/claude
@@ -104,157 +112,120 @@ test it -- that is a login-node daemon on a shared-`$HOME` socket; see the codex
 section of `README.md`. The real check is the `codex:` line in the job log once
 the box is up.
 
-## 4. Create the session root
+## 4. Where does durable state live?
+
+Answer this before anything else, because it decides every path below.
 
 ```bash
-mkdir -p ~/devbox ~/logs
+# Is $HOME the same filesystem on the login node and a compute node?
+ls ~/.claude.json                                   # here
+srun -t 2 --mem=1G bash -c 'ls ~/.claude.json; df -h $HOME | tail -1'
 ```
 
-The root must **not** be `$HOME`. Home-directory workspace trust is
-session-only and is never persisted — a home-rooted job stops at the trust
-dialog on every node hop forever, and project settings and hooks are silently
-dropped. `$HOME` is reachable anyway: the job passes `--add-dir $HOME`.
-
-## 5. HUMAN STEP: accept the trust dialog once
+If the compute node cannot see it, `$HOME` is **node-local** and the defaults
+are all wrong: workspace trust, conversation history, the tunnel token and the
+codex enrollment would each be missing on the other side of a node hop, quietly.
+Set `DEVBOX_CONFIG_HOME` in this cluster's stanza to a filesystem every node
+mounts, and move the existing config there:
 
 ```bash
-cd ~/devbox && claude      # accept the workspace-trust prompt, then /exit
+rsync -a ~/.claude/ /shared/you/.claude/
+cp -p ~/.claude.json /shared/you/.claude/.claude.json   # NOTE: moves INSIDE the dir
 ```
 
-This is the other step a batch job cannot do — nobody is there to answer the
-dialog, and the job would sit on it for its whole walltime. `devbox-up` refuses
-to submit until it sees `hasTrustDialogAccepted` for the root in
-`~/.claude.json`, so a missed step fails fast with instructions rather than
-hanging.
+`CLAUDE_CONFIG_DIR` relocates the whole directory *including* `.claude.json`
+(verified against 2.1.278), so trust, history and the login travel as one unit.
+Export it (plus `CODEX_HOME`, `VSCODE_CLI_DATA_DIR` and the two keychain
+variables) from the shell profile too, **above any interactive guard**, so
+plain `claude` on the login node and a batch job agree about which config they
+are using.
 
-Verify:
+## 5. Point at the active project
+
+The agents start **in** the active project — it is each slot's working
+directory, and so what Claude Code treats as the session root.
 
 ```bash
-devbox-up config | tail -3        # preflight must say "ok"
+active-project /path/to/the/repo        # grants trust, asking first
+active-project                          # verify
 ```
 
-## 6. Install the pin hook
+This is also the step that used to be an unavoidable human one. `active-project`
+writes `hasTrustDialogAccepted` itself rather than sending you off to
+`cd <dir> && claude` to answer a dialog you already answered by naming the
+directory. It prompts first and lists any `.claude/settings.json`, `.mcp.json`
+or `.claude/hooks/` in the tree, because those execute on session start — that,
+not reading the code, is what trust is actually about. `--trust` skips the
+prompt for scripts; it refuses rather than assuming when not on a tty.
 
-Symlink the shared one; don't write a second copy:
+Slot conversations are keyed by **(project, slot)** under
+`$DEVBOX_STATE/projects/<project>/`, so switching projects gives that project
+its own three conversations and switching back resumes them. One consequence
+worth knowing: a running slot cannot change its own working directory, so
+repointing does *not* move live agents however many times you `/clear` — they
+follow on the next `devbox-up restart`.
 
-```bash
-ROOT=$(devbox-up config | awk '/^root/{print $3}')
-mkdir -p "$ROOT/.claude"
-ln -sfn ~/slurm-utils/devbox/settings.json "$ROOT/.claude/settings.json"
-python3 -m json.tool "$ROOT/.claude/settings.json" >/dev/null && echo ok
-```
+If you genuinely do not know the project yet, skip this; the box falls back to
+`DEVBOX_ROOT`.
 
-If that root needs Claude Code settings of its own, put them in
-`.claude/settings.local.json` next to the symlink — Claude Code merges it over
-the shared file, so the two do not fight.
+## 6. Install the hooks (user level)
 
-Without this, `/clear` in a slot silently orphans that slot's conversation: it
-mints a new conversation id inside the same process, the pinned id goes stale,
-and the next job in the chain resumes the abandoned pre-`/clear` conversation.
-The hook rewrites the slot's id file with whatever conversation it is actually
-in, and no-ops in any session that is not a devbox slot.
-
-Note this edits the agent's own hook configuration. If you are an agent running
-under a permission policy, expect that write to need approval — ask rather than
-routing around it.
-
-## 6b. Install the slurm guard
-
-This one goes in `~/.claude/settings.json` — **user** level, not the root's
-`.claude/` — so it covers every session under this `$HOME`, not only the devbox
-slots. Merge the `hooks` key into whatever is already in that file; do not
-overwrite it:
+All three go in `$CLAUDE_CONFIG_DIR/settings.json` — **user** level, not a
+project's `.claude/`. The agents move between projects, so a project-level
+install would have to be repeated in, and would litter, every repo they are
+ever pointed at. Merge into whatever is already in that file:
 
 ```json
-{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
-  "command": "$HOME/slurm-utils/devbox/slurm-guard",
-  "timeout": 10, "statusMessage": "slurm guard"}]}]}}
+{"hooks": {
+  "SessionStart": [{"hooks": [
+    {"type": "command", "command": "<devbox>/pin-session"},
+    {"type": "command", "command": "<devbox>/active-project --hook"}]}],
+  "PreToolUse": [{"matcher": "Bash", "hooks": [
+    {"type": "command", "command": "<devbox>/slurm-guard",
+     "timeout": 10, "statusMessage": "slurm guard"}]}]}}
 ```
 
-Verify, with a command that is only an `echo` and so is harmless if the hook is
-*not* working — it must come back denied:
+- **`pin-session`** keeps each slot's id pointing at the conversation it is
+  actually in. Without it `/clear` silently orphans that slot: it mints a new
+  id inside the same process, the pinned one goes stale, and the next restart
+  resumes the abandoned pre-`/clear` conversation. No-ops outside a slot.
+- **`active-project --hook`** tells every new conversation which project is
+  active, and warns when the pointer is stale.
+- **`slurm-guard`** blocks `scontrol update ... NodeList=`/`ReqNodes=` with an
+  empty value, which crashes `slurmctld` for the whole cluster on Slurm
+  23.02.1. Install it on every cluster whatever the version. It is a hook and
+  not a rule in `AGENTS.md` on purpose: a prompt-level rule is advice a
+  subagent can reason past, and a subagent is what caused the second crash.
+  `ExcNodeList=` stays allowed, empty or not — that is the field to use instead.
+
+Verify with a command that is only an `echo`, so it is harmless if the hook is
+*not* working. It must come back denied:
 
 ```bash
 echo 'scontrol update JobId=999999 NodeList='
 ```
 
-It blocks `scontrol update ... NodeList=`/`ReqNodes=` with an empty value, which
-crashes `slurmctld` for the whole cluster on Slurm 23.02.1 (2026-08-19, and again
-2026-09-18 from a workflow subagent). Install it on every cluster whatever the
-version — one regex per Bash call against a failure nobody can recover from
-inside a session. `ExcNodeList=` is deliberately still allowed, empty or not,
-since that is the field you are meant to use instead.
+## 7. Install the cluster rules
 
-It is a hook rather than a rule in `AGENTS.md`, on purpose: a prompt-level rule
-is advice a subagent can reason past, and a subagent is what caused the second
-crash. Nothing is added to any `AGENTS.md` or `CLAUDE.md` for this.
-
-## 7. Install `AGENTS.md`
-
-The cluster's rules live in git under `clusters/<cluster>/AGENTS.md` and are
-**symlinked** into the root — a copy in the root drifts from the repo silently.
+Cluster facts live in git at `clusters/<cluster>/AGENTS.md` and reach sessions
+through **user-level memory**, for the same reason the hooks do — the agents
+are not rooted in one fixed directory any more:
 
 ```bash
-mkdir -p ~/slurm-utils/devbox/clusters/$CC_CLUSTER
-cp ~/slurm-utils/devbox/AGENTS.template.md ~/slurm-utils/devbox/clusters/$CC_CLUSTER/AGENTS.md
+mkdir -p "$DEVBOX_DIR/clusters/<cluster>"
+cp "$DEVBOX_DIR/AGENTS.template.md" "$DEVBOX_DIR/clusters/<cluster>/AGENTS.md"
 # fill in the TODOs, then:
-ln -sfn ~/slurm-utils/devbox/clusters/$CC_CLUSTER/AGENTS.md "$ROOT/AGENTS.md"
-echo '@AGENTS.md' > "$ROOT/CLAUDE.md"    # or add that line to an existing CLAUDE.md
+echo "@$DEVBOX_DIR/clusters/<cluster>/AGENTS.md" >> "$CLAUDE_CONFIG_DIR/CLAUDE.md"
 ```
 
-Import the portable rules with the **absolute** path
-`@~/slurm-utils/devbox/AGENTS.shared.md`, not a relative one: the file is read
-through a symlink, so a relative import resolves against the wrong directory.
-Leave a TODO rather than guessing a number you have not measured.
+Import the portable rules from inside that file with an **absolute** path
+(`@/path/to/devbox/AGENTS.shared.md`), never `@~/...`: on a node-local-`$HOME`
+site `~` resolves somewhere different depending on the node.
 
-That absolute path points outside the root, which makes it an **external**
-include -- gated behind a one-time per-root dialog that a batch job has nobody
-to answer, so without it every slot comes up parked on *"Yes, allow external
-imports"*. `devbox-up` preflight approves it for this root before submitting, so
-there is nothing to do here; it is called out only because the failure looks
-like the agents started fine.
-
-Where the root is an existing project repo, git-ignore the two symlinks — they
-point into `$HOME` and mean nothing in a fresh clone:
-
-```
-/AGENTS.md
-/.claude/settings.json
-.claude/settings.local.json
-```
-
-**If the work is not under `$HOME`,** set `DEVBOX_ADD_DIRS` in this cluster's
-`config.sh` stanza to the trees the agents need (`"$HOME /scratch/$USER"`, say).
-The root is implicit; the default list is `$HOME` alone, and an agent that cannot
-read its own repo is useless. `devbox-up config` does not print it — check the
-`add-dir:` line in the job log, or the dry run at the end of this file.
-
-## 7b. Point at the active project
-
-```bash
-active-project ~/the-repo-being-worked-on
-active-project                     # verify
-```
-
-Optionally make the shell follow the same pointer, so there is one source of
-truth rather than a path hardcoded in `~/.bashrc` too:
-
-```bash
-__devbox_project=$("$HOME/slurm-utils/devbox/active-project" 2>/dev/null)
-[ -d "${__devbox_project:-}" ] && cd "$__devbox_project"
-unset __devbox_project
-```
-
-Test the directory, then `cd` — never `cd "$p" || cd ~`. Where `.bashrc`
-overrides `cd`, the override returns the *other* command's status, so a fallback
-chained on `cd` fires even when the `cd` succeeded.
-
-The root is not the work (trust and history pin it), and `/clear` starts a
-conversation that remembers nothing — so without this, every clear means telling
-each slot again where the code is. A `SessionStart` hook injects the pointer into
-each new conversation and `devbox.sh` passes it to `--add-dir`. Skip it if you
-genuinely do not know yet; sessions then start with no project line rather than a
-wrong one, and `active-project <dir>` can be set at any time.
+Those absolute paths are **external** includes, gated behind a one-time
+per-project dialog a batch job has nobody to answer. `active-project` and
+`devbox-up` preflight both approve it, so there is nothing to do here; it is
+called out only because the failure looks like the agents started fine.
 
 ## 8. Launch
 

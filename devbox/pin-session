@@ -9,15 +9,24 @@
 # a slot launched as --session-id 5a9ce381 was on 8ea4b2a3 after one /clear.
 # Fires on startup, resume and clear, so the pin follows the live conversation.
 #
-# Install once per cluster, in the session root's .claude/settings.json
-# (~/devbox/.claude/settings.json by default):
+# Install once per cluster, at USER level, in $CLAUDE_CONFIG_DIR/settings.json:
 #   {"hooks":{"SessionStart":[{"hooks":[
-#      {"type":"command","command":"$HOME/slurm-utils/devbox/pin-session"}]}]}}
+#      {"type":"command","command":"<devbox>/pin-session"}]}]}}
+#
+# User level rather than the session root's .claude/settings.json, because the
+# agents now start in the active project: a root-level install would have to be
+# repeated in -- and would litter -- every project they are ever pointed at.
 #
 # No-op outside a devbox slot: DEVBOX_SLOT is set only by devbox.sh, so this is
-# harmless in every other session that shares the same settings file.
+# harmless in every other session that shares the same settings file, which at
+# user level is all of them.
 [ -n "$DEVBOX_SLOT" ] || exit 0
-[ -n "$DEVBOX_STATE" ] || exit 0
+# Where this slot's id file lives. DEVBOX_SLOT_DIR is per (project, slot),
+# because history is keyed by the working directory and a pin written into
+# another project's set would be handed to --resume in a project whose
+# transcript does not contain it. DEVBOX_STATE is the pre-per-project fallback.
+SLOT_DIR="${DEVBOX_SLOT_DIR:-$DEVBOX_STATE}"
+[ -n "$SLOT_DIR" ] || exit 0
 case "$DEVBOX_SLOT" in
     [0-9]|[0-9][0-9]) ;;                  # a slot number, not a path fragment
     *) exit 0 ;;
@@ -33,10 +42,11 @@ case "$id" in
     *) exit 0 ;;                               # nothing trustworthy to pin
 esac
 
-f="$DEVBOX_STATE/session-id-$DEVBOX_SLOT"
+f="$SLOT_DIR/session-id-$DEVBOX_SLOT"
 [ "$(cat "$f" 2>/dev/null)" = "$id" ] && exit 0
-mkdir -p "$DEVBOX_STATE"
+mkdir -p "$SLOT_DIR"
 printf '%s\n' "$id" > "$f"
 chmod 600 "$f"
-printf '%s slot %s -> %s\n' "$(date -Is)" "$DEVBOX_SLOT" "$id" >> "$DEVBOX_STATE/pins.log"
+printf '%s slot %s -> %s\n' "$(date -Is)" "$DEVBOX_SLOT" "$id" \
+    >> "${DEVBOX_STATE:-$SLOT_DIR}/pins.log"
 exit 0

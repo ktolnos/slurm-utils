@@ -443,11 +443,21 @@ activate() {
 # DEVBOX
 # ------------------------------------------------------------------------------
 # Puts `devbox-up` on the PATH. See devbox/README.md; the cluster is detected
-# from $CC_CLUSTER, so the same checkout works everywhere.
-case ":$PATH:" in
-    *":$HOME/slurm-utils/devbox:"*) ;;
-    *) export PATH="$HOME/slurm-utils/devbox:$PATH" ;;
-esac
+# by config.sh, so the same checkout works everywhere.
+#
+# Derived from THIS FILE's own location, not from $HOME. The checkout is not
+# always under $HOME -- on a site whose $HOME is node-local it has to live on
+# shared storage instead (CHAI keeps it on the NAS) -- and a hardcoded
+# ~/slurm-utils there silently puts a directory that does not exist on PATH, so
+# `devbox-up` reports as not installed on a cluster where it plainly is.
+SLURM_UTILS_DIR="${SLURM_UTILS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+export SLURM_UTILS_DIR
+if [ -d "$SLURM_UTILS_DIR/devbox" ]; then
+    case ":$PATH:" in
+        *":$SLURM_UTILS_DIR/devbox:"*) ;;
+        *) export PATH="$SLURM_UTILS_DIR/devbox:$PATH" ;;
+    esac
+fi
 
 # ------------------------------------------------------------------------------
 # UPDATE NOTICE
@@ -473,7 +483,7 @@ _slurm_utils_update_notice() {
     # sourced ABOVE .bashrc's own interactive guard, so srun steps and every
     # devbox.sh job start (it sources .bashrc) reach this code too.
     case $- in *i*) ;; *) return 0 ;; esac
-    local dir="${SLURM_UTILS_DIR:-$HOME/slurm-utils}"
+    local dir="$SLURM_UTILS_DIR"
     [ -d "$dir/.git" ] || return 0
 
     # Throttled refresh, detached so it never delays the prompt. The stamp is
@@ -490,7 +500,7 @@ _slurm_utils_update_notice() {
     case "$behind" in ''|0|*[!0-9]*) return 0 ;; esac   # in sync, ahead, or no ref yet
 
     printf '\033[33m⚠ slurm-utils is %s commit(s) behind origin/main\033[0m — pull, then restart to apply:\n' "$behind"
-    printf 'git -C ~/slurm-utils pull && devbox-up restart\n'
+    printf 'git -C %s pull && devbox-up restart\n' "$dir"
 }
 _slurm_utils_update_notice
 
@@ -504,8 +514,8 @@ _slurm_utils_update_notice
 # $DEVBOX_PROJECT as an override, so the stale env would beat the file the
 # SessionStart hook reads. Keep that variable for a deliberate one-off override.
 project() {
-    if [ $# -gt 0 ]; then "$HOME/slurm-utils/devbox/active-project" "$1"; return; fi
+    if [ $# -gt 0 ]; then "$SLURM_UTILS_DIR/devbox/active-project" "$1"; return; fi
     local p
-    p=$("$HOME/slurm-utils/devbox/active-project") || return 1
+    p=$("$SLURM_UTILS_DIR/devbox/active-project") || return 1
     cd "$p"
 }

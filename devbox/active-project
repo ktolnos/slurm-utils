@@ -2,16 +2,19 @@
 # The active project: one file saying which tree the agents should be working
 # in, and a SessionStart hook that tells every new conversation about it.
 #
-# Why this exists: the session root (~/devbox) is fixed by workspace trust and
-# by history being keyed on an absolute path, so it cannot be the project you
-# are working on. That left the agents rooted somewhere that is not the work,
-# and every /clear meant telling each slot again where the work actually is --
-# /clear starts a fresh conversation with no memory of the last one.
+# Why this exists: the agents start IN this directory -- it is the working
+# directory each slot is launched in, and so the directory Claude Code treats
+# as the session root. Two things are keyed to that path and therefore follow
+# it: workspace trust, and conversation history. Slot ids are stored per
+# project for the same reason (see devbox.sh), so switching away and back
+# resumes that project's conversations instead of stranding them.
 #
 #   active-project                 print the active project path
-#   active-project <dir>           set it
+#   active-project <dir>           set it (grants trust, asking first)
+#   active-project --trust <dir>   set it, granting trust without asking
 #   active-project --clear         unset it
 #   active-project --hook          emit SessionStart JSON (used by the hook)
+#   active-project --trust-status [dir]   exit 0 if that project is trusted
 #
 # The value lives in $DEVBOX_STATE/active-project, per cluster, because the work
 # in flight on one cluster has nothing to do with another's. $DEVBOX_PROJECT
@@ -25,6 +28,77 @@ fi
 STATE="${DEVBOX_STATE:-$HOME/.devbox/${DEVBOX_CLUSTER:-unknown}}"
 FILE="$STATE/active-project"
 
+# Where Claude Code keeps its config. CLAUDE_CONFIG_DIR relocates the whole
+# directory INCLUDING .claude.json (verified against 2.1.278) -- which is what
+# makes a node-local $HOME survivable at all -- so trust has to be read and
+# written there whenever it is set, not at a hardcoded ~/.claude.json.
+claude_json() {
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then printf '%s\n' "$CLAUDE_CONFIG_DIR/.claude.json"
+    else printf '%s\n' "$HOME/.claude.json"; fi
+}
+
+# 0 = trusted. No config file, no entry for it, or an explicit false = not.
+is_trusted() {
+    python3 - "$(claude_json)" "$1" <<'PYT'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(2)
+sys.exit(0 if cfg.get("projects", {}).get(sys.argv[2], {}).get("hasTrustDialogAccepted") is True else 1)
+PYT
+}
+
+# What trusting a directory actually exposes you to. The dialog is not really
+# asking whether the code is safe to read: opening a directory makes Claude
+# Code load THAT directory's settings, so hooks and MCP servers declared in the
+# tree execute on session start. Name the files rather than ask in the
+# abstract, so the answer is an informed one.
+trust_risks() {
+    local d=$1 f found=
+    for f in .claude/settings.json .claude/settings.local.json .mcp.json; do
+        [ -e "$d/$f" ] && found="$found $f"
+    done
+    [ -d "$d/.claude/hooks" ] && found="$found .claude/hooks/"
+    printf '%s' "$found"
+}
+
+# Trust is a plain persisted boolean, the same shape as the external-includes
+# flag devbox-up already seeds -- so naming a project here can settle it, and
+# `cd <dir> && claude` to answer the same question a second time is not needed.
+# That matters beyond convenience: a batch-launched slot has nobody to answer
+# the dialog and would sit parked on it for the whole walltime.
+grant_trust() {
+    python3 - "$(claude_json)" "$1" <<'PYT'
+import json, os, sys, tempfile
+path, root = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as fh: cfg = json.load(fh)
+except FileNotFoundError:
+    cfg = {}
+except Exception as e:
+    print(f"cannot read {path}: {e}", file=sys.stderr); sys.exit(1)
+proj = cfg.setdefault("projects", {}).setdefault(root, {})
+proj["hasTrustDialogAccepted"] = True
+# The cluster rules reach a session through an absolute @/nas/... import, which
+# counts as an EXTERNAL include and has a one-time dialog of its own. Same
+# shape, same reason to settle it here rather than discover it as three slots
+# parked on "Yes, allow external imports".
+proj["hasClaudeMdExternalIncludesApproved"] = True
+proj["hasClaudeMdExternalIncludesWarningShown"] = True
+d = os.path.dirname(path) or "."
+os.makedirs(d, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=d)
+try:
+    with os.fdopen(fd, "w") as fh: json.dump(cfg, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)        # atomic: live agents write this file too
+except Exception:
+    if os.path.exists(tmp): os.unlink(tmp)
+    raise
+PYT
+}
+
 read_project() {
     # An explicit override wins, so a single command or shell can point
     # somewhere else without disturbing what every other session sees.
@@ -34,6 +108,11 @@ read_project() {
     [ -n "$p" ] || return 1
     printf '%s\n' "$p"
 }
+
+# A leading --trust turns the confirmation below into a no-op, for the
+# non-interactive callers (setup scripts, a slot asked to repoint itself).
+TRUST_OK=0
+if [ "${1:-}" = "--trust" ]; then TRUST_OK=1; shift; fi
 
 case "${1:-show}" in
 --hook)
@@ -54,12 +133,21 @@ case "${1:-show}" in
     # session for the life of the conversation, and AGENTS.shared.md already
     # explains why the root is not the project -- repeating it here would be
     # paying for the same words twice. ~25 tokens instead of ~122.
-    python3 - "$p" <<'PY'
+    python3 - "$p" <<'PYH'
 import json, sys
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
- "additionalContext": f"Active project: {sys.argv[1]} -- work there, not in the "
-                      "session root. Repoint with `active-project <dir>`."}}))
-PY
+ "additionalContext": f"Active project: {sys.argv[1]} (this session's working "
+                      "directory). Repoint with `active-project <dir>`; running "
+                      "slots need a relaunch to follow it."}}))
+PYH
+    ;;
+--trust-status)
+    # For devbox-up preflight: an untrusted project parks every slot on a
+    # dialog no batch job can answer, so it has to be caught before launch.
+    d=${2:-}
+    [ -n "$d" ] || d=$(read_project) || { echo "no active project set" >&2; exit 2; }
+    if is_trusted "$d"; then echo "trusted: $d"
+    else echo "NOT trusted: $d" >&2; exit 1; fi
     ;;
 --clear)
     rm -f "$FILE"; echo "active project cleared ($FILE)"
@@ -75,9 +163,38 @@ show|"")
     # Store it absolute and symlink-resolved: the value is read by other
     # sessions, other slots and the next job, none of which share this cwd.
     dir=$(cd "$dir" && pwd -P) || exit 1
+
+    # Trust before recording it, not after: a pointer at an untrusted tree is
+    # exactly the state that parks every slot on a dialog at launch.
+    if ! is_trusted "$dir"; then
+        risks=$(trust_risks "$dir")
+        if [ "$TRUST_OK" != 1 ]; then
+            echo "not yet trusted: $dir"
+            if [ -n "$risks" ]; then
+                echo "  it carries project settings that RUN on session start:$risks"
+                echo "  read those before agreeing -- hooks and MCP servers execute commands."
+            else
+                echo "  no project settings, hooks or MCP servers found in it"
+            fi
+            if [ -t 0 ]; then
+                printf 'trust it and let agents start there? [y/N] '
+                read -r reply
+                case "$reply" in y|Y|yes|YES) TRUST_OK=1 ;; esac
+            fi
+            [ "$TRUST_OK" = 1 ] || {
+                echo "not set. to skip this prompt: active-project --trust $dir" >&2; exit 1; }
+        fi
+        grant_trust "$dir" || exit 1
+        echo "trusted: $dir"
+    fi
+
     mkdir -p "$STATE"
     printf '%s\n' "$dir" > "$FILE"
     echo "active project: $dir"
-    echo "(new sessions and each /clear pick this up; already-running ones need a /clear)"
+    # NOT "/clear picks this up" any more. The project is each slot's working
+    # directory, and a running process cannot change its own cwd -- so a slot
+    # keeps working in the old project until it is relaunched, however many
+    # times it is cleared.
+    echo "(running slots keep their old directory; relaunch them to follow this)"
     ;;
 esac
