@@ -32,8 +32,14 @@ FILE="$STATE/active-project"
 # directory INCLUDING .claude.json (verified against 2.1.278) -- which is what
 # makes a node-local $HOME survivable at all -- so trust has to be read and
 # written there whenever it is set, not at a hardcoded ~/.claude.json.
+# Unset -- an interactive login shell -- falls back to the devbox's config dir
+# from config.sh, not ~/.claude.json: the slots run with CLAUDE_CONFIG_DIR set
+# to it, so that is the file their trust is read from. Falling back to
+# ~/.claude.json made `active-project --trust` from a login shell write a flag
+# devbox-up's preflight then could not see.
 claude_json() {
-    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then printf '%s\n' "$CLAUDE_CONFIG_DIR/.claude.json"
+    local d="${CLAUDE_CONFIG_DIR:-${DEVBOX_CLAUDE_CONFIG_DIR:-}}"
+    if [ -n "$d" ]; then printf '%s\n' "$d/.claude.json"
     else printf '%s\n' "$HOME/.claude.json"; fi
 }
 
