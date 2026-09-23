@@ -26,7 +26,7 @@ source "$DEVBOX_DIR/config.sh"
 # whether it is logged in, and both of those live under these directories. With
 # $HOME assumed, preflight on a node-local-$HOME site would cheerfully validate
 # a different machine's config than the one the agents will use.
-export CLAUDE_CONFIG_DIR="$DEVBOX_CLAUDE_CONFIG_DIR"
+devbox_export_claude_config   # not a plain export -- see config.sh
 export CODEX_HOME="$DEVBOX_CODEX_HOME"
 export VSCODE_CLI_DATA_DIR="$DEVBOX_VSCODE_DATA_DIR"
 
@@ -222,8 +222,8 @@ preflight() {
     #
     # Read-modify-write with an atomic rename, touching one key of one project
     # and no-oping when already true, because live agents write this file too.
-    if [ -f "$CLAUDE_CONFIG_DIR/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
-        python3 - "$workdir" "$CLAUDE_CONFIG_DIR/.claude.json" <<'SEED'
+    if [ -f "$DEVBOX_CLAUDE_JSON" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$workdir" "$DEVBOX_CLAUDE_JSON" <<'SEED'
 import json, os, sys, tempfile
 root = sys.argv[1]
 path = sys.argv[2]
@@ -411,7 +411,7 @@ config)
     echo "mode        : $([ "$DEVBOX_LOCAL" != 0 ] && echo "local (no Slurm job)" || echo 'slurm job')"
     echo "workdir     : $(devbox_workdir)   <- agents start here"
     echo "root        : $DEVBOX_ROOT (fallback when no active project)"
-    echo "config home : $DEVBOX_CONFIG_HOME (claude=$DEVBOX_CLAUDE_CONFIG_DIR)"
+    echo "config home : $DEVBOX_CONFIG_HOME (claude=$DEVBOX_CLAUDE_JSON)"
     echo "slots       : $DEVBOX_SLOTS"
     echo "name        : $DEVBOX_NAME (tunnel), $DEVBOX_NAME-<slot> (remote control)"
     # No name of ours here: codex reports gethostname() to the app, so the box

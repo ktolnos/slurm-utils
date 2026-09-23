@@ -79,7 +79,7 @@ export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 # workspace trust and the history that every --resume depends on. Get it wrong
 # on a node-local-$HOME site and the box comes up with three slots parked on a
 # trust dialog and every pinned conversation silently replaced by an empty one.
-export CLAUDE_CONFIG_DIR="$DEVBOX_CLAUDE_CONFIG_DIR"
+devbox_export_claude_config   # not a plain export -- see config.sh
 export CODEX_HOME="$DEVBOX_CODEX_HOME"
 # Both keychain vars are load-bearing: without them `code tunnel user show`
 # reports logged in on the login node and not logged in on every compute node.
@@ -125,7 +125,7 @@ else
     echo "=== $DEVBOX_JOB_NAME job $SLURM_JOB_ID on $(hostname) ($DEVBOX_CLUSTER) at $(date) ==="
 fi
 echo "    project=$WORKDIR  slots=[$DEVBOX_SLOTS]  name=$DEVBOX_NAME"
-echo "    state=$SLOT_DIR  config=$CLAUDE_CONFIG_DIR"
+echo "    state=$SLOT_DIR  config=$DEVBOX_CLAUDE_JSON"
 
 # Queue the successor NOW: survives node failure, OOM and scancel, and accrues
 # queue age. A USR1 trap would not fire in any of those cases. Resubmitting from
@@ -143,7 +143,7 @@ fi
 
 tmux has-session -t claude 2>/dev/null && tmux kill-session -t claude
 
-HIST_DIR="$CLAUDE_CONFIG_DIR/projects/$(echo "$WORKDIR" | sed 's/[^A-Za-z0-9]/-/g')"
+HIST_DIR="$DEVBOX_CLAUDE_CONFIG_DIR/projects/$(echo "$WORKDIR" | sed 's/[^A-Za-z0-9]/-/g')"
 
 # Pin one conversation per slot, minted once and then kept forever:
 # --resume needs the id to exist, --session-id needs it not to. A slot whose id
@@ -152,6 +152,18 @@ HIST_DIR="$CLAUDE_CONFIG_DIR/projects/$(echo "$WORKDIR" | sed 's/[^A-Za-z0-9]/-/
 session_arg() {
     local f="$SLOT_DIR/session-id-$1" id
     id=$(cat "$f" 2>/dev/null)
+    # Adopt a pre-per-project pin from the flat $DEVBOX_STATE/session-id-N, but
+    # only when its transcript is under THIS project (proof it was minted here)
+    # and the per-project pin has no conversation yet. Without this, the first
+    # job after the layout change minted fresh ids and dropped every slot's
+    # conversation. The flat file is moved, so it is adopted at most once.
+    local legacy="$DEVBOX_STATE/session-id-$1" old
+    if [ ! -f "$HIST_DIR/$id.jsonl" ] && [ -f "$legacy" ]; then
+        old=$(cat "$legacy" 2>/dev/null)
+        if [ -n "$old" ] && [ -f "$HIST_DIR/$old.jsonl" ]; then
+            id=$old; printf '%s\n' "$id" > "$f"; chmod 600 "$f"; rm -f "$legacy"
+        fi
+    fi
     if [ -z "$id" ]; then
         id=$(uuidgen); printf '%s\n' "$id" > "$f"; chmod 600 "$f"
     fi

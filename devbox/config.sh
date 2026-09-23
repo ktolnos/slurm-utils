@@ -189,6 +189,24 @@ DEVBOX_CONFIG_HOME="${DEVBOX_CONFIG_HOME:-$HOME}"
 # .claude.json, which holds the trust flags (verified against 2.1.278) -- it is
 # not just a cache location, so it is the single variable that has to be right.
 DEVBOX_CLAUDE_CONFIG_DIR="${DEVBOX_CLAUDE_CONFIG_DIR:-$DEVBOX_CONFIG_HOME/.claude}"
+# ...but it is not a no-op when pointed at the default. Unset, .claude.json is
+# ~/.claude.json, a SIBLING of ~/.claude; set -- even to ~/.claude -- it moves
+# INSIDE, to ~/.claude/.claude.json. Exporting it unconditionally handed every
+# slot on killarney a brand-new empty config: no onboarding, no trust, all three
+# parked on the first-run theme picker. So it is exported only when relocated
+# (devbox_export_claude_config), and everything that reads .claude.json asks
+# DEVBOX_CLAUDE_JSON rather than rebuilding the path.
+if [ "$DEVBOX_CLAUDE_CONFIG_DIR" = "$HOME/.claude" ]; then
+    DEVBOX_CLAUDE_RELOCATED=0
+    DEVBOX_CLAUDE_JSON="$HOME/.claude.json"
+else
+    DEVBOX_CLAUDE_RELOCATED=1
+    DEVBOX_CLAUDE_JSON="$DEVBOX_CLAUDE_CONFIG_DIR/.claude.json"
+fi
+devbox_export_claude_config() {
+    if [ "$DEVBOX_CLAUDE_RELOCATED" = 1 ]; then export CLAUDE_CONFIG_DIR="$DEVBOX_CLAUDE_CONFIG_DIR"
+    else unset CLAUDE_CONFIG_DIR; fi
+}
 DEVBOX_VSCODE_DATA_DIR="${DEVBOX_VSCODE_DATA_DIR:-$DEVBOX_CONFIG_HOME/.vscode-cli}"
 DEVBOX_CODEX_HOME="${DEVBOX_CODEX_HOME:-$DEVBOX_CONFIG_HOME/.codex}"
 
