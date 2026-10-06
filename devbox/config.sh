@@ -64,6 +64,15 @@ case "$DEVBOX_CLUSTER" in
         # nothing to set. sbatch from /home works here.
         :
         ;;
+    nibi)
+        # Two accounts, and $SBATCH_ACCOUNT (set by the site profile) holds the
+        # wrong one for this job: rrg-gigor is a GPU-only RAC -- its only
+        # association is rrg-gigor_gpu, and a CPU-only submit is rejected with
+        # "You are not a member of the specified account" (verified 2026-10-05
+        # with --test-only). The devbox has no GPU, so it runs on def-gigor.
+        # Partitions route on --time, and sbatch from /home works.
+        DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-def-gigor}"
+        ;;
     killarney)
         # sbatch is rejected from /home on this cluster: the check is on the
         # submitting *directory*, not on where the script lives, so submitting
