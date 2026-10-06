@@ -72,6 +72,8 @@ case "$DEVBOX_CLUSTER" in
         # with --test-only). The devbox has no GPU, so it runs on def-gigor.
         # Partitions route on --time, and sbatch from /home works.
         DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-def-gigor}"
+        # codex is not installed here yet.
+        DEVBOX_CODEX="${DEVBOX_CODEX:-0}"
         ;;
     killarney)
         # sbatch is rejected from /home on this cluster: the check is on the

@@ -74,5 +74,5 @@ scratch.
 
 - **Cache redirects** (`HF_HOME`, `TMPDIR`, `TORCHINDUCTOR_*`, …) point at
   `/scratch/eop` in `~/.bashrc`, so jobs inherit them.
-- **`pip` is a shell function** in `~/.bashrc` that calls `uv pip` when `uv` is
-  on `PATH` (`~/.local/bin/uv`).
+- **`pip` is a shell function** (from `slurm_utils.sh`) that calls `uv pip` when
+  `uv` is on `PATH` (`~/.local/bin/uv`).
