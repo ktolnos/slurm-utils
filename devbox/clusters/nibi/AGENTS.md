@@ -15,18 +15,26 @@ Portable rules are imported, not copied.
 | `sbatch` from `/home` | works here |
 | Partition | don't name one; it routes on `--time` and on what you request |
 
-## Accounts: GPU jobs on `rrg-gigor`, everything else on `def-gigor`
+## Accounts: GPU jobs on whichever has the higher FairShare, CPU jobs on `def-gigor`
 
 | Job | Account | Why |
 |---|---|---|
-| requests a GPU | `rrg-gigor` (the default: `$SBATCH_ACCOUNT`) | the group's RAC allocation |
+| requests a GPU | **`--account="$(best_account gpu)"`, always** | `rrg-gigor` (RAC) and `def-gigor` both have a `_gpu` association; FairShare is most of a job's priority, so the less-used one starts sooner |
 | CPU only | **`--account=def-gigor`, always** | `rrg-gigor` has only a `_gpu` association |
 
+`best_account` (from `slurm_utils.sh`) reads `sshare` at submission time and
+prints the account without its suffix. It moves with usage, so never hard-code
+its answer into a script. On 2026-10-14 a job pending 4 h on `rrg-gigor`
+(FairShare 0.25) started within minutes of moving to `def-gigor` (0.28).
+
 `$SBATCH_ACCOUNT` is `rrg-gigor` in every shell and job, set by the site
-profile. A CPU-only job submitted without `--account=def-gigor` is **rejected**
-with "You are not a member of the specified account rrg-gigor" — that message
-means a missing `--account`, not a membership problem. Slurm adds the
-`_cpu`/`_gpu` suffix itself; never write it. The devbox itself runs on
+profile, so a job submitted without `--account` lands there. A CPU-only job
+submitted without `--account=def-gigor` is **rejected** with "You are not a
+member of the specified account rrg-gigor" — that message means a missing
+`--account`, not a membership problem. `sbatch` adds the `_cpu`/`_gpu` suffix
+itself; never write it there. `scontrol update JobId=<id> Account=` on a
+*pending* job is the exception: it needs the suffixed name
+(`def-gigor_gpu`) and rejects the bare one. The devbox itself runs on
 `def-gigor` (`config.sh`).
 
 ## GPUs: ask for the smallest that fits

@@ -255,6 +255,46 @@ if not found_any and (skipped_bad_state + skipped_cpu + skipped_mem) > 0:
     )
 " "$show_counts" "$mem_mode"
 }
+
+# ------------------------------------------------------------------------------
+# Function: best_account
+# ------------------------------------------------------------------------------
+# Description:
+#   Prints the account whose association of the given kind (gpu or cpu) has the
+#   highest FairShare for you right now, for `sbatch --account=...`. FairShare
+#   is most of a job's priority, and it moves with usage: an allocation the
+#   group has barely used can outrank a larger one it has been running on.
+#
+# Logic:
+#   1. Reads your associations from `sshare -U` (Account|FairShare).
+#   2. Keeps those ending in _<kind>, and picks the highest FairShare.
+#   3. Prints the account without the suffix, which `sbatch` adds itself.
+#      (`scontrol update ... Account=` on a pending job wants the suffixed
+#      name instead.)
+#   4. Prints nothing and returns 1 when no association matches, so
+#      `--account=$(best_account gpu)` fails loudly instead of silently
+#      submitting with an empty account.
+#
+# Usage:
+#   best_account [gpu|cpu]      (default: gpu)
+#   best_account -v gpu         also lists every candidate on stderr
+#   sbatch --account="$(best_account gpu)" job.sh
+# ------------------------------------------------------------------------------
+best_account() {
+    local verbose=0
+    [[ "$1" == "-v" ]] && { verbose=1; shift; }
+    local kind="${1:-gpu}"
+    local rows
+    rows=$(sshare -U -u "$USER" -o Account,FairShare -n -P 2>/dev/null \
+           | awk -F'|' -v k="_${kind}" 'substr($1, length($1) - length(k) + 1) == k')
+    if [[ -z "$rows" ]]; then
+        echo "best_account: no _${kind} association for $USER" >&2
+        return 1
+    fi
+    (( verbose )) && echo "$rows" | sed 's/^/  /' >&2
+    echo "$rows" | sort -t'|' -k2,2 -gr | head -n 1 | cut -d'|' -f1 | sed "s/_${kind}\$//"
+}
+
 # ------------------------------------------------------------------------------
 # Function: sbt (Smart Batch Tail)
 # ------------------------------------------------------------------------------
