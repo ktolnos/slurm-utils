@@ -76,6 +76,14 @@ the tree without appearing as tmux windows.
 
 ## Submitting jobs
 
+- **Get the experimental design approved before spending tens of GPU-hours.**
+  Before launching anything that adds up to tens of GPU-hours, show the user
+  the design: the arms, the seeds, what each arm tests, and the GPU-hours per
+  arm. Then wait for their OK. "Run the experiments" is not approval for an
+  open-ended budget. Reruns, extra seeds and new arms added partway through
+  need the same check. Skip it only when the user explicitly asks for that
+  particular run. Smoke tests and debugging jobs of a few GPU-hours are fine
+  without asking.
 - **Ask for the smallest GPU that fits.** Where a cluster partitions GPUs (MIG),
   a partition request reaches strictly more nodes than a whole card, so it
   usually starts sooner *and* leaves the big cards alone. The cluster's
