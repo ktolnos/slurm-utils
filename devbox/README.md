@@ -482,7 +482,23 @@ srun --jobid=$JOB --overlap --pty tmux attach -t claude
 resources. The same form works for one-shot inspection:
 `srun --jobid=$JOB --overlap tmux capture-pane -t claude:agent -p`.
 
-### Home-directory trust is session-only, so the devbox is NOT rooted at $HOME
+### Home-directory trust is session-only (and so is `--add-dir`'s)
+
+> **Update 2026-11-17 (Claude Code 2.1.326).** Every `--add-dir` now gets its
+> own "Adding a new directory" dialog whose answer "holds for this session",
+> unless that directory already has persisted trust. So `--add-dir $HOME`
+> re-prompts on every job exactly like a home root does, and the advice below
+> ("never `$HOME`, nothing re-prompts") no longer holds. `devbox.sh` now answers
+> both dialogs itself through `trust-approve`, which says yes only to the
+> working directory and the directories in `DEVBOX_ADD_DIRS`, and only when the
+> pane ends in the dialog's footer. With that in place a `$HOME` root is the
+> default (`DEVBOX_ROOT=$HOME`; chai keeps its root on `/nas`, its `$HOME`
+> being node-local), a slot starting at the root continues its most recent
+> conversation from wherever it last was -- the old root or an active project
+> -- replacing an older one at the root (`migrate_root` in `devbox.sh`), and
+> consequence 2 below does not apply to a session whose dialog was accepted --
+> the user-scope hooks were seen running in a home-rooted slot. The rest of
+> this section is the history.
 
 Rooted at `/home/eop`, Claude Code shows the workspace-trust dialog and, when
 you accept, **does not persist it** -- `hasTrustDialogAccepted` stays `false` in

@@ -87,13 +87,22 @@ export CODEX_HOME="$DEVBOX_CODEX_HOME"
 export VSCODE_CLI_USE_FILE_KEYCHAIN=1 VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT=1
 export VSCODE_CLI_DATA_DIR="$DEVBOX_VSCODE_DATA_DIR" VSCODE_CLI_NONINTERACTIVE=1
 
+# Both spellings: claude reads HTTPS_PROXY, curl and most other tools the
+# lowercase one. Exported after .bashrc for the same reason as the above.
+if [ -n "$DEVBOX_HTTP_PROXY" ]; then
+    export http_proxy="$DEVBOX_HTTP_PROXY" https_proxy="$DEVBOX_HTTP_PROXY"
+    export HTTP_PROXY="$DEVBOX_HTTP_PROXY" HTTPS_PROXY="$DEVBOX_HTTP_PROXY"
+    export no_proxy="$DEVBOX_NO_PROXY" NO_PROXY="$DEVBOX_NO_PROXY"
+fi
+
 # --- where the agents work ----------------------------------------------------
 # The agents start IN the active project. Claude Code keys both workspace trust
 # and conversation history to the working directory, so that one path decides
 # which conversations resume and whether the slots come up at all -- which is
 # why active-project grants trust when it is set rather than leaving it to a
 # dialog nobody is here to answer. DEVBOX_ROOT is now only the fallback for
-# when no project has been named.
+# when no project has been named. ($HOME and the --add-dir trees cannot be
+# granted ahead of time at all; approve_trust below answers those.)
 ACTIVE_PROJECT="$("$DEVBOX_DIR/active-project" 2>/dev/null)"
 WORKDIR="${ACTIVE_PROJECT:-$DEVBOX_ROOT}"
 if [ ! -d "$WORKDIR" ]; then
@@ -145,6 +154,85 @@ tmux has-session -t claude 2>/dev/null && tmux kill-session -t claude
 
 HIST_DIR="$DEVBOX_CLAUDE_CONFIG_DIR/projects/$(echo "$WORKDIR" | sed 's/[^A-Za-z0-9]/-/g')"
 
+# When the slots start at the root, each one continues the conversation it was
+# last having, wherever that was: the old root after a root move, or a project
+# that was active until now. History is keyed by the working directory, so
+# without this a slot that changes directory comes up in an empty conversation
+# (or in a stale one it left at the root weeks ago).
+#
+# Per slot: among every project's pin for that slot, find the one whose
+# transcript was written most recently. If it is not the root's own -- the root
+# has none, or an older one -- copy it under the root's key and pin it there.
+# "Older" is the transcript's mtime, and it must be strictly older, so a copy
+# that has not been used since (cp -p keeps the mtime) is not copied again.
+#
+# The pin directories and Claude Code's history directories use the same key
+# (the path with non-alphanumerics replaced by -), so the scan below never has
+# to turn a key back into a path.
+#
+# Copies, never moves: the transcript, its sidecar directory (subagents, tool
+# results) and the pin. A transcript copied under another key resumes normally
+# from there (verified on 2.1.326), and the original stays resumable where it
+# was. The root's previous conversation is only unpinned, not deleted; `/resume`
+# still lists it. Runs at job start, the only moment it is safe: the job that
+# was appending to those transcripts is gone.
+#
+# One way only. Starting in an active project never pulls the root's
+# conversation into it -- a project's set is the one that belongs to it.
+migrate_root() {
+    [ "$WORKDIR" = "$DEVBOX_ROOT" ] || return 0
+    local projects="$DEVBOX_CLAUDE_CONFIG_DIR/projects" slot d key id t
+    local best_key best_id best_t cur_id cur_t
+    for slot in $DEVBOX_SLOTS; do
+        cur_id=$(cat "$SLOT_DIR/session-id-$slot" 2>/dev/null)
+        cur_t=$(stat -c %Y "$HIST_DIR/$cur_id.jsonl" 2>/dev/null || echo 0)
+        best_key=""; best_id=""; best_t=$cur_t
+        for d in "$DEVBOX_STATE"/projects/*/; do
+            [ "${d%/}" = "$SLOT_DIR" ] && continue
+            key=$(basename "$d")
+            id=$(cat "$d/session-id-$slot" 2>/dev/null)
+            [ -n "$id" ] || continue
+            t=$(stat -c %Y "$projects/$key/$id.jsonl" 2>/dev/null) || continue
+            [ "$t" -gt "$best_t" ] && { best_key=$key; best_id=$id; best_t=$t; }
+        done
+        [ -n "$best_key" ] || continue
+        mkdir -p "$HIST_DIR"
+        # The same conversation can already be here, from an earlier trip, and
+        # have been continued on both sides since. The newer side wins, as
+        # everywhere else: a newer copy here is only pinned, not replaced, and
+        # an older one is kept under another name rather than overwritten.
+        local src="$projects/$best_key/$best_id.jsonl" here="$HIST_DIR/$best_id.jsonl" copy=1
+        if [ -e "$here" ] && ! cmp -s "$src" "$here"; then
+            if [ "$(stat -c %Y "$here")" -ge "$best_t" ]; then
+                copy=0
+            else
+                mv "$here" "$here.replaced-$(date +%Y%m%dT%H%M%S)"
+            fi
+        fi
+        if [ "$copy" = 1 ]; then
+            cp -p "$src" "$here" || continue
+            if [ -d "$projects/$best_key/$best_id" ]; then
+                mkdir -p "$HIST_DIR/$best_id"; cp -rp "$projects/$best_key/$best_id/." "$HIST_DIR/$best_id/"
+            fi
+        fi
+        printf '%s\n' "$best_id" > "$SLOT_DIR/session-id-$slot"; chmod 600 "$SLOT_DIR/session-id-$slot"
+        echo "slot $slot: continuing $best_id from $best_key${cur_id:+ (was $cur_id, older; still in /resume)}"
+        # The agents' memory is per project too. Copy the files that are not
+        # already at the root and leave an existing index alone -- the root may
+        # have memories of its own -- but say so: unindexed files are not loaded.
+        if [ -d "$projects/$best_key/memory" ] && [ ! -e "$HIST_DIR/.memory-from-$best_key" ]; then
+            mkdir -p "$HIST_DIR/memory"
+            [ -e "$HIST_DIR/memory/MEMORY.md" ] && \
+                echo "memory: the root already has a MEMORY.md -- files copied, but merge the index from $projects/$best_key/memory/MEMORY.md by hand"
+            # Not `cp -n ... && marker`: since coreutils 9.2, -n exits 1 (and
+            # complains) whenever it skips a file, which is the normal case
+            # here, so the marker would never be written.
+            cp -rpn "$projects/$best_key/memory/." "$HIST_DIR/memory/" 2>/dev/null
+            : > "$HIST_DIR/.memory-from-$best_key"
+        fi
+    done
+}
+
 # Pin one conversation per slot, minted once and then kept forever:
 # --resume needs the id to exist, --session-id needs it not to. A slot whose id
 # has never been used yet keeps its uuid and starts it -- do not re-mint, or the
@@ -181,7 +269,10 @@ start_tmux() {
     local i
     for i in $(seq 1 10); do
         tmux has-session -t claude 2>/dev/null && return 0
-        tmux new-session -d -s claude -n "agent$(set -- $DEVBOX_SLOTS; echo "$1")" -c "$WORKDIR"
+        # Wide on purpose: a detached session is 80x24, which wraps a long path
+        # across two lines of a trust dialog, and trust-approve reads the
+        # directory off the screen.
+        tmux new-session -d -s claude -x 200 -y 50 -n "agent$(set -- $DEVBOX_SLOTS; echo "$1")" -c "$WORKDIR"
         tmux has-session -t claude 2>/dev/null && return 0
         sleep 3
     done
@@ -192,6 +283,9 @@ start_tmux() {
 # survives the trip through tmux send-keys, and skipped when absent so a
 # cluster's stanza can name a tree that only some nodes mount.
 ADD_DIRS=""
+# The same directories unquoted, plus the working directory: exactly the set
+# trust-approve may say yes to.
+TRUST_DIRS=("$WORKDIR")
 # The project no longer needs naming here -- it is the working directory, so it
 # is implicit. What does need naming is everything OUTSIDE it: $HOME, this
 # cluster's shared trees, and DEVBOX_ROOT, so the devbox's own scripts and docs
@@ -201,6 +295,7 @@ for d in $DEVBOX_ADD_DIRS "$DEVBOX_ROOT"; do
     [ -d "$d" ] || { echo "add-dir: skipping $d (not a directory)"; continue; }
     case "$ADD_DIRS" in *"--add-dir '$d'"*) continue ;; esac   # named twice
     ADD_DIRS="$ADD_DIRS --add-dir '$d'"
+    TRUST_DIRS+=("$d")
 done
 echo "    add-dir:$ADD_DIRS"
 [ -n "$ACTIVE_PROJECT" ] || \
@@ -225,6 +320,30 @@ launch_agent() {
     echo "slot $slot: $DEVBOX_NAME-$slot  $arg"
 }
 launch_agents() { local s; for s in $DEVBOX_SLOTS; do launch_agent "$s"; done; }
+
+# Answer the startup trust dialogs nobody is here to answer -- see trust-approve
+# for which ones and why they cannot be pre-seeded. Only within 5 min of a
+# slot's launch: the dialogs appear at startup and nowhere else, so there is no
+# reason to keep reading a working agent's screen after that.
+approve_trust() {
+    local slot
+    for slot in $DEVBOX_SLOTS; do
+        [ $(( SECONDS - ${LAST_LAUNCH[$slot]:-0} )) -le 300 ] || continue
+        tmux list-windows -t claude -F '#{window_name}' 2>/dev/null | grep -qx "agent$slot" || continue
+        "$DEVBOX_DIR/trust-approve" "claude:agent$slot" "${TRUST_DIRS[@]}" 2>&1
+    done
+}
+# Right after a launch, poll instead of waiting for the 60 s watchdog tick, so
+# the slots are online within seconds. Stops early once every slot has answered
+# and a further pass finds nothing.
+approve_trust_startup() {
+    local i quiet=0
+    for i in $(seq 1 20); do
+        sleep 3
+        if approve_trust | grep . ; then quiet=0; else quiet=$((quiet + 1)); fi
+        [ "$quiet" -ge 5 ] && break
+    done
+}
 
 launch_tunnel() {
     [ -x "$DEVBOX_CODE_BIN" ] || { echo "tunnel: no code CLI at $DEVBOX_CODE_BIN -- skipping"; return 1; }
@@ -301,7 +420,8 @@ launch_codex() {
     [ "$state" = up ]
 }
 
-if start_tmux; then launch_agents; launch_tunnel
+migrate_root
+if start_tmux; then launch_agents; launch_tunnel; approve_trust_startup
 else echo "FATAL: no tmux server; watchdog below keeps retrying"; fi
 launch_codex     # independent of tmux: no window, no session to wait for
 CODEX_CHECKED=$SECONDS
@@ -321,7 +441,8 @@ while true; do
     # Watchdog: agents and tunnel are windows of this one session, so losing it
     # means idling for the rest of the walltime unless something rebuilds it.
     tmux has-session -t claude 2>/dev/null \
-        || { start_tmux && { launch_agents; launch_tunnel; }; continue; }
+        || { start_tmux && { launch_agents; launch_tunnel; approve_trust_startup; }; continue; }
+    approve_trust       # a slot the watchdog relaunched a minute ago
     # Per-slot watchdog: a window whose foreground process is back to a shell
     # lost its agent. Checking the pane command (not just the window) is what
     # makes a single dead slot recoverable instead of idle until the job ends.

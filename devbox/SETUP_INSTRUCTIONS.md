@@ -79,6 +79,22 @@ export VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT=1
 export VSCODE_CLI_DATA_DIR="$HOME/.vscode-cli"
 ```
 
+Also point the caches at scratch, in the same block, unless an existing
+`~/.bashrc` already does (check with `grep -n HF_HOME ~/.bashrc`). Nothing else
+sets these, and `AGENTS.shared.md` tells agents they are set:
+
+```bash
+export HF_HOME="<scratch>/hf"
+export UV_CACHE_DIR="<scratch>/uv-cache"
+export UV_LINK_MODE=copy   # needed when the cache and the venvs are on different filesystems
+export PIP_CACHE_DIR="<scratch>/pip-cache"
+export WANDB_DIR="<scratch>/wandb"
+export WANDB_CACHE_DIR="$WANDB_DIR/cache"
+export WANDB_DATA_DIR="$WANDB_DIR/data"
+```
+
+Leave `TMPDIR` alone: inside a job, Slurm sets a node-local one.
+
 Both keychain variables are load-bearing. Without them `code tunnel user show`
 reports *logged in* on the login node and *not logged in* on every compute node,
 so the tunnel silently never starts. The cost is that
@@ -267,6 +283,7 @@ Diagnose in this order; each rules out the one below.
 | Job runs, exits at once | `~/logs/claude-dev-<jobid>.out`; a rejected sbatch flag or a missing `$DEVBOX_ROOT` |
 | Job runs, no tmux session | the socket race — the watchdog retries; if it never recovers, check whether `/tmp` is job-private |
 | tmux is up, agent panes sit at a shell | the agent exited; capture the pane (`devbox-up attach N`) and look for the trust dialog or a login prompt |
+| agent panes sit at "Accessing workspace" / "Adding a new directory" | `trust-approve` should have answered within a minute; the job log says why not (a directory `config.sh` does not name is left unanswered on purpose). By hand: `srun --jobid=<id> --overlap ~/slurm-utils/devbox/trust-approve claude:agentN <dir>...` |
 | Agents fine, no tunnel | `code tunnel user show` on a *compute* node, not the login node — this is the keychain-variable symptom |
 | Everything fine, wrong conversations | the slot id files in `~/.devbox/<cluster>/`; never let two sessions share one uuid |
 

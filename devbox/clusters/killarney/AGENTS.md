@@ -12,7 +12,7 @@ Portable rules are imported, not copied.
 | Cluster name (`$CC_CLUSTER`) | `killarney` |
 | Account | `aip-gigor` — the only association for this user. `$SBATCH_ACCOUNT` is **unset** and Slurm resolves no default, so `--account` must be named on every job. |
 | Devbox names | `killarney-dev` (tunnel), `killarney-dev` / `-2` / `-3` (remote control) |
-| Devbox root | the project repo, `/project/6101830/eop/unlearning-reward-hacking`. `$HOME` and `/scratch/eop` arrive via `--add-dir`; `/project` outside the repo does not. |
+| Devbox root | `$HOME` (the project repo until 2026-11-17). The repo `/project/6101830/eop/unlearning-reward-hacking` and `/scratch/eop` arrive via `--add-dir`; `/project` outside the repo does not. A slot with no active project therefore sits in `/home`, where `sbatch` is rejected (next row). |
 | Login node → compute | **`sbatch` is rejected from `/home`.** The check is on the submitting *directory*, not on where the script lives — `cd /scratch/eop; sbatch ~/some/script.sh` is fine. `devbox-up` handles this via `DEVBOX_SUBMIT_DIR`. |
 | Python | `uv`. The repo has `uv.lock` and a `.venv`; use `uv run python …`, which resolves the environment without activating it. |
 

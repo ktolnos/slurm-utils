@@ -199,8 +199,13 @@ preflight() {
     # Delegated to active-project so there is one implementation of "is this
     # trusted" and one of how to grant it -- and so the fix printed here is a
     # single command rather than an interactive detour through `claude`.
+    #
+    # $HOME is the exception: its trust cannot be persisted by anyone, so there
+    # is nothing to check here, and the job answers the dialog itself
+    # (trust-approve) on every start.
     if [ "$workdir" = "$HOME" ]; then
-        echo "  FATAL: the working directory must not be \$HOME -- home trust is session-only and never persists"; bad=1
+        [ -x "$DEVBOX_DIR/trust-approve" ] || {
+            echo "  FATAL: the working directory is \$HOME but $DEVBOX_DIR/trust-approve is missing or not executable"; bad=1; }
     elif ! "$DEVBOX_DIR/active-project" --trust-status "$workdir" >/dev/null 2>&1; then
         echo "  FATAL: workspace trust not accepted for $workdir"
         echo "         grant it with: active-project --trust $workdir"

@@ -1,0 +1,75 @@
+#!/bin/bash
+# Answer Claude Code's directory-trust dialogs in a tmux pane, for the
+# directories named on the command line and no others.
+#
+#   trust-approve <tmux-target> <dir>...
+#
+# Why this exists: two of those dialogs can no longer be settled ahead of time.
+#   - "Accessing workspace: <dir>"    when the session starts in $HOME, whose
+#     trust is session-only by design and is never written to .claude.json;
+#   - "Adding a new directory: <dir>" for every --add-dir, whose answer also
+#     "holds for this session" (first seen on 2.1.326, 2026-11-17).
+# Both default to "No, exit", and a devbox job has nobody to press the keys, so
+# every slot parked there and never reached Remote Control.
+#
+# What keeps this from being a blanket "yes":
+#   - the directory shown in the dialog must be one of <dir>... (compared after
+#     realpath), so only what config.sh named is ever approved;
+#   - the pane must END with the dialog's own footer. An agent whose transcript
+#     merely quotes the dialog text has its input box below that, not the footer,
+#     so keys are never typed into a live conversation;
+#   - Enter is sent only once the cursor is seen on the "Yes" line. Nothing here
+#     assumes which option is the default or where it sits in the list.
+#
+# Exit: 0 answered at least one dialog, 1 no dialog on screen, 2 a dialog for a
+# directory that was not named (left alone), 3 could not put the cursor on Yes.
+
+TMUX_BIN="${DEVBOX_TMUX:-tmux}"      # overridable so a test can use `tmux -L x`
+target=${1:?usage: trust-approve <tmux-target> <dir>...}; shift
+
+screen() { $TMUX_BIN capture-pane -p -t "$target" 2>/dev/null | sed 's/[[:space:]]*$//' | grep -v '^$'; }
+cursor_on_yes() { printf '%s\n' "$1" | grep '❯' | tail -1 | grep -q 'Yes'; }
+
+answered=0
+# Dialogs come one after another (workspace, then each --add-dir), so keep
+# going until the screen stops showing one.
+for _ in 1 2 3 4 5 6 7 8; do
+    s=$(screen)
+    printf '%s\n' "$s" | tail -1 | grep -q 'Enter to confirm' || break
+    # The directory starts on the line after the (last) header. A path longer
+    # than the pane is wide continues on the following lines -- the window is
+    # made 200 wide, but an attached narrower client shrinks it -- so join
+    # lines until one with a space in it (the dialog's prose) begins. Joining
+    # too much only makes the string longer, and it must still equal a named
+    # directory exactly, so a mis-join can make this refuse but not over-approve.
+    dir=$(printf '%s\n' "$s" | awk '
+        /^ *(Accessing workspace|Adding a new directory): *$/ { buf = ""; on = 1; n = 0; next }
+        on && n < 6 { sub(/^ +/, ""); if (n > 0 && index($0, " ")) on = 0; else { buf = buf $0; n++ } }
+        END { print buf }')
+    case "$dir" in /*) ;; *) break ;; esac      # some other dialog -- not ours
+
+    ok=0
+    for d in "$@"; do
+        [ "$dir" = "$d" ] || [ "$(realpath -m "$dir")" = "$(realpath -m "$d")" ] || continue
+        ok=1; break
+    done
+    if [ "$ok" != 1 ]; then
+        echo "trust-approve: $target asks about '$dir', which config.sh does not name -- left unanswered" >&2
+        exit 2
+    fi
+
+    # Walk the cursor down to the Yes line rather than assuming it is one below.
+    for _ in 1 2 3; do
+        cursor_on_yes "$s" && break
+        $TMUX_BIN send-keys -t "$target" Down; sleep 0.5; s=$(screen)
+    done
+    if ! cursor_on_yes "$s"; then
+        echo "trust-approve: $target: could not select Yes for '$dir' -- left unanswered" >&2
+        exit 3
+    fi
+    $TMUX_BIN send-keys -t "$target" Enter
+    echo "trust-approve: $target: approved $dir"
+    answered=1
+    sleep 2
+done
+[ "$answered" = 1 ]

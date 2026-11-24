@@ -75,6 +75,24 @@ case "$DEVBOX_CLUSTER" in
         # codex is not installed here yet.
         DEVBOX_CODEX="${DEVBOX_CODEX:-0}"
         ;;
+    tamia)
+        # No SBATCH_ACCOUNT in the environment, and aip-gigor is the only
+        # association. A CPU-only submit routes itself to cpubase_bycore_*
+        # on --time (verified 2026-10-14 with --test-only), but nothing here
+        # runs longer than 1 day, so the chain hops daily.
+        DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-aip-gigor}"
+        DEVBOX_TIME="${DEVBOX_TIME:-1-00:00:00}"
+        # Compute nodes have no direct internet. The site's own squid (what
+        # `module load httpproxy/1.0` sets) does pass the Anthropic API and
+        # the VS Code tunnel relay: a tunnel run in a CPU job served a vscode.dev
+        # client, server download included (verified 2026-10-14 from tc11101).
+        DEVBOX_HTTP_PROXY="${DEVBOX_HTTP_PROXY:-http://squid.tamia.ecpia.ca:3128}"
+        DEVBOX_NO_PROXY="${DEVBOX_NO_PROXY:-tamia.ecpia.ca,localhost,127.0.0.1}"
+        # Home is 25 GB here; the work lives in scratch.
+        DEVBOX_ADD_DIRS="${DEVBOX_ADD_DIRS:-$HOME ${SCRATCH:-/scratch/e/$USER}}"
+        # codex is not installed here yet.
+        DEVBOX_CODEX="${DEVBOX_CODEX:-0}"
+        ;;
     killarney)
         # sbatch is rejected from /home on this cluster: the check is on the
         # submitting *directory*, not on where the script lives, so submitting
@@ -84,13 +102,10 @@ case "$DEVBOX_CLUSTER" in
         # No SBATCH_ACCOUNT in the environment here, and Killarney does not
         # resolve a default, so the account has to be named.
         DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-aip-gigor}"
-        # Home is 50 GB here and holds no work, so the root is the project repo
-        # itself -- which is already trust-accepted, so there is no interactive
-        # step, and the pre-devbox single-agent conversation stays resumable
-        # (history is keyed by the root's absolute path, so a root move would
-        # strand it). $HOME and $SCRATCH come in via --add-dir.
-        DEVBOX_ROOT="${DEVBOX_ROOT:-/project/6101830/eop/unlearning-reward-hacking}"
-        DEVBOX_ADD_DIRS="${DEVBOX_ADD_DIRS:-$HOME ${SCRATCH:-/scratch/$USER}}"
+        # The root was the project repo until 2026-11-17, when every cluster
+        # moved to $HOME (the slots' conversations follow -- migrate_root in
+        # devbox.sh). The repo and $SCRATCH come in via --add-dir.
+        DEVBOX_ADD_DIRS="${DEVBOX_ADD_DIRS:-$HOME /project/6101830/eop/unlearning-reward-hacking ${SCRATCH:-/scratch/$USER}}"
         ;;
     ist|chai)
         # CHAI (UC Berkeley). Matched under both labels on purpose: the name is
@@ -117,6 +132,8 @@ case "$DEVBOX_CLUSTER" in
         DEVBOX_LOG_DIR="${DEVBOX_LOG_DIR:-/nas/ttl=60d/eop/logs}"
         # Fallback working directory only -- the agents start in the active
         # project (see devbox.sh). This is where they land when none is set.
+        # NOT the $HOME default every other cluster uses: $HOME is node-local
+        # and nearly full here, so the root stays on /nas.
         DEVBOX_ROOT="${DEVBOX_ROOT:-/nas/ucb/eop/slurm-utils}"
         # $HOME is per-node and small but still worth reaching; /nas/ucb/eop is
         # the real home here and /nas/ttl=60d/eop is this site's scratch.
@@ -159,11 +176,19 @@ DEVBOX_UPDATE="${DEVBOX_UPDATE:-1}"
 # that hangs must not hold up the box indefinitely.
 DEVBOX_UPDATE_TIMEOUT="${DEVBOX_UPDATE_TIMEOUT:-300}"
 
-# Session root. NOT $HOME: home-directory workspace trust is session-only and
-# never persists, so a home-rooted job stops at the trust dialog on every node
-# hop, forever. This must be a real project directory you have accepted the
-# trust dialog in once. $HOME comes in via --add-dir instead.
-DEVBOX_ROOT="${DEVBOX_ROOT:-$HOME/devbox}"
+# Session root: where the slots start when no active project is set. $HOME, so
+# they sit above every repo rather than inside one of them.
+#
+# (chai is the one exception -- its $HOME is node-local, so its stanza keeps
+# the root on /nas.) This used to be forbidden (the default was $HOME/devbox): home-directory
+# trust is session-only and never persists, so a home-rooted slot meets the
+# trust dialog on every job. But since 2.1.326 every --add-dir asks once per
+# session too, so there is a dialog to answer whichever root is chosen, and
+# devbox.sh now answers them itself through trust-approve (2026-11-17).
+#
+# History is keyed to the directory, so a root move would start every slot in
+# a new conversation; migrate_root in devbox.sh is what carries them across.
+DEVBOX_ROOT="${DEVBOX_ROOT:-$HOME}"
 
 # Extra directories each agent gets via --add-dir, space separated. The root is
 # implicit; this is for the trees that live outside it. $HOME is the default
@@ -250,6 +275,12 @@ DEVBOX_SUBMIT_DIR="${DEVBOX_SUBMIT_DIR:-$HOME}"
 DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-${SBATCH_ACCOUNT:-}}"
 DEVBOX_PARTITION="${DEVBOX_PARTITION:-}"
 DEVBOX_EXTRA_SBATCH="${DEVBOX_EXTRA_SBATCH:-}"
+
+# HTTP(S) proxy for the job, on a site whose compute nodes reach the internet
+# only through one. Empty means connect directly. Exported inside the job only,
+# so the login node's own traffic is untouched.
+DEVBOX_HTTP_PROXY="${DEVBOX_HTTP_PROXY:-}"
+DEVBOX_NO_PROXY="${DEVBOX_NO_PROXY:-localhost,127.0.0.1}"
 
 # --- sbatch flags -------------------------------------------------------------
 # Printed one per line so callers can read them into an array and keep quoting
