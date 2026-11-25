@@ -18,9 +18,18 @@
 # tunnel named "-dev".
 devbox_cluster() {
     [ -n "${DEVBOX_CLUSTER:-}" ] && { printf '%s\n' "$DEVBOX_CLUSTER"; return; }
-    [ -n "${CC_CLUSTER:-}" ]     && { printf '%s\n' "$CC_CLUSTER"; return; }
     local n
     n=$(scontrol show config 2>/dev/null | awk '/^ClusterName/{print $3; exit}')
+    # Tidewater's site profile exports CC_CLUSTER=killarney ("pretend we're
+    # another Vector cluster", /etc/profile.d/zz-50-modules-cvmfs-alliance.sh),
+    # so trusting it would hand this box killarney's stanza -- its account, its
+    # /project root -- and killarney's tunnel name and state directory. Matched
+    # by name rather than "Slurm's name wins whenever they differ": that rule
+    # would rename the box on any Alliance cluster whose ClusterName is not
+    # spelled exactly like its CC_CLUSTER, stranding its pinned conversations,
+    # and none of those could be checked from here.
+    [ "$n" = tidewater ] && { printf '%s\n' "$n"; return; }
+    [ -n "${CC_CLUSTER:-}" ]     && { printf '%s\n' "$CC_CLUSTER"; return; }
     # "slurm" is slurm.conf's compiled-in default, not a name anyone chose: a
     # site that never set ClusterName reports it (CHAI does), and taking it at
     # face value would name the tunnel "slurm-dev" and key the state directory
@@ -151,6 +160,37 @@ case "$DEVBOX_CLUSTER" in
         DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-chai}"
         DEVBOX_PARTITION="${DEVBOX_PARTITION:-main}"
         ;;
+    tidewater)
+        # Vector's B200 cluster. The box runs on the LOGIN node, not in a job:
+        # there is no CPU-only partition and billing is MAX_TRES with one CPU
+        # weighted at 1/14 of a B200 (verified 2026-11-24: a 1-CPU job billed
+        # 1521, a GPU is 21300), so even a 1-CPU box would draw ~12 GPU-h a
+        # week from humanpref-igor's fair share. The login node caps each user
+        # at 4 CPUs / 12 GB (systemd user slice) and logind does not kill
+        # processes at logout, so the box survives the ssh session. It pins
+        # itself to the login node it was started on (tlogin01 or tlogin02,
+        # with no ssh between them), so attach from that one.
+        DEVBOX_LOCAL="${DEVBOX_LOCAL:-1}"
+        # The VS Code server is the heavy part of the box, and on a shared
+        # login node it should not idle all day: `devbox-up tunnel start`.
+        DEVBOX_TUNNEL="${DEVBOX_TUNNEL:-0}"
+        # Not installed here.
+        DEVBOX_CODEX="${DEVBOX_CODEX:-0}"
+        # The root is the group's shared project tree, where the repos live,
+        # not $HOME: /project is a directory sbatch accepts (it rejects any
+        # submit from /home), so an agent never needs a `cd /scratch` first.
+        DEVBOX_ROOT="${DEVBOX_ROOT:-/project/humanpref-igor/shared}"
+        # $HOME spelled physically: it is /h/eop, /h is a symlink to /home, and
+        # claude keys history and trust by the resolved path (~/.claude/projects
+        # has -home-eop, never -h-eop).
+        DEVBOX_ADD_DIRS="${DEVBOX_ADD_DIRS:-$(cd "$HOME" 2>/dev/null && pwd -P) ${SCRATCH:-/scratch/$USER}}"
+        # Used only with DEVBOX_LOCAL=0. sbatch is rejected from /home (the
+        # check is on the submitting directory), there is no SBATCH_ACCOUNT,
+        # and the 3-day walltime routes to b200_b2 on its own.
+        DEVBOX_SUBMIT_DIR="${DEVBOX_SUBMIT_DIR:-${SCRATCH:-/scratch/$USER}}"
+        DEVBOX_ACCOUNT="${DEVBOX_ACCOUNT:-humanpref-igor}"
+        DEVBOX_CPUS="${DEVBOX_CPUS:-1}"
+        ;;
     *)
         # Unknown cluster: the defaults are the portable ones. If the first
         # `devbox-up` fails, the flag it rejects is the thing to add above.
@@ -261,6 +301,17 @@ DEVBOX_CODEX_BIN="${DEVBOX_CODEX_BIN:-$HOME/.local/bin/codex}"
 # per-slot to configure: the daemon is a singleton and the app creates sessions
 # inside it.
 DEVBOX_CODEX="${DEVBOX_CODEX:-1}"
+
+# VS Code tunnel. 1 starts it with the box (and again whenever the watchdog
+# rebuilds the tmux session); 0 leaves it to `devbox-up tunnel start`, for a
+# site where an idle VS Code server is a cost worth not paying all day.
+DEVBOX_TUNNEL="${DEVBOX_TUNNEL:-1}"
+# One log per job, or per host in local mode. Shared by devbox.sh (which
+# truncates it) and devbox-tunnel (which writes it), so both must agree.
+devbox_tunnel_log() {
+    if [ "$DEVBOX_LOCAL" != 0 ]; then printf '%s/tunnel-local-%s.log\n' "$DEVBOX_LOG_DIR" "$(hostname -s)"
+    else printf '%s/tunnel-%s.log\n' "$DEVBOX_LOG_DIR" "${SLURM_JOB_ID:-unknown}"; fi
+}
 
 # Run the box directly on this machine instead of inside a Slurm job. Anything
 # but 0 means local. Use it where the login node is meant to be used directly

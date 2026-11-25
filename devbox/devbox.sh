@@ -58,10 +58,7 @@ unset TMUX TMUX_PANE
 
 SCRIPT="$DEVBOX_DIR/devbox.sh"
 STOP_FILE="$DEVBOX_STATE/stop"
-# Names the log files. Outside Slurm there is no job id, and every run would
-# otherwise share one "tunnel-.log" and interleave into it.
-RUN_ID="${SLURM_JOB_ID:-local-$(hostname -s)-$$}"
-TUNNEL_LOG="$DEVBOX_LOG_DIR/tunnel-$RUN_ID.log"
+TUNNEL_LOG="$(devbox_tunnel_log)"   # per job, or per host locally -- see config.sh
 
 # A login shell's .bashrc may override `cd` with a function that returns some
 # other command's exit status (a venv `activate`, say), which makes `cd x && y`
@@ -345,20 +342,12 @@ approve_trust_startup() {
     done
 }
 
+# The tunnel lives in devbox-tunnel so that it can also be started and stopped
+# on demand (`devbox-up tunnel start|stop`). Here it starts only when it is
+# meant to be always on.
 launch_tunnel() {
-    [ -x "$DEVBOX_CODE_BIN" ] || { echo "tunnel: no code CLI at $DEVBOX_CODE_BIN -- skipping"; return 1; }
-    "$DEVBOX_CODE_BIN" tunnel user show 2>&1 | grep -qi "logged in with" || {
-        echo "tunnel: code CLI not authenticated on this node -- skipping"; return 1; }
-    rm -f "$VSCODE_CLI_DATA_DIR/tunnel-stable.lock"   # stale lock from a killed job
-    tmux list-windows -t claude -F '#{window_name}' | grep -qx tunnel \
-        || tmux new-window -t claude -n tunnel -c "$HOME"
-    # cd first: the folder the shell is in becomes the default folder in the
-    # vscode.dev/tunnel/... link. Never pipe `code tunnel` through tee
-    # unattended -- unauthenticated it redraws an interactive picker forever,
-    # hundreds of MB in under a minute. Hence the guard above and the
-    # truncation below.
-    tmux send-keys -t claude:tunnel \
-        "cd '$WORKDIR'; '$DEVBOX_CODE_BIN' tunnel --accept-server-license-terms --name $DEVBOX_NAME >> '$TUNNEL_LOG' 2>&1" C-m
+    [ "$DEVBOX_TUNNEL" != 0 ] || { echo "tunnel: on demand (DEVBOX_TUNNEL=0) -- devbox-up tunnel start"; return 0; }
+    "$DEVBOX_DIR/devbox-tunnel" start
 }
 
 # Codex remote control. Deliberately NOT a tmux window: `remote-control start`

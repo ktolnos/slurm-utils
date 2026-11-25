@@ -450,6 +450,79 @@ psbt() {
     sbt "$@"
 }          
 
+# ------------------------------------------------------------------------------
+# Function: gpuutil
+# ------------------------------------------------------------------------------
+# GPU utilization of jobs, from Slurm's own accounting -- for sites that audit
+# GPU efficiency (tidewater does), where an idle allocated GPU is a cost to the
+# project and a mark against it.
+#
+#   gpuutil                 your running jobs, plus GPU jobs that ended in the last 24 h
+#   gpuutil <jobid>...      those jobs
+#   gpuutil -l [<jobid>...] live: nvidia-smi inside each RUNNING job (srun --overlap)
+#
+# Reads gres/gpuutil and gres/gpumem out of TRESUsageInAve: sstat for a running
+# job, sacct for a finished one. Both need AccountingStorageTRES to track
+# gres/gpuutil; where it does not, the column reads "-" and -l is the fallback.
+# Slurm samples at JobAcctGatherFrequency (30 s on tidewater); -l is the
+# instantaneous picture, the accounting figure the one an audit sees.
+# Steps under 50% are flagged LOW.
+# ------------------------------------------------------------------------------
+gpuutil() {
+    local live=0
+    [ "${1:-}" = "-l" ] && { live=1; shift; }
+    local jobs=("$@")
+    if [ ${#jobs[@]} -eq 0 ]; then
+        mapfile -t jobs < <( {
+            squeue -u "$USER" -h -t RUNNING -o '%i'
+            sacct -u "$USER" -X -n -P -S now-1days -E now -o JobID,AllocTRES \
+                | awk -F'|' '$2 ~ /gres\/gpu=/ {print $1}'
+        } | sort -u)
+    fi
+    [ ${#jobs[@]} -gt 0 ] || { echo "no GPU jobs (running, or ended in the last 24 h)"; return 0; }
+
+    local j state
+    if [ "$live" = 1 ]; then
+        for j in "${jobs[@]}"; do
+            state=$(squeue -h -j "$j" -o '%T' 2>/dev/null)
+            [ "$state" = RUNNING ] || { echo "== $j: ${state:-not running} -- skipped"; continue; }
+            echo "== $j ($(squeue -h -j "$j" -o '%j on %N'))"
+            srun --jobid="$j" --overlap --ntasks-per-node=1 nvidia-smi \
+                --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw \
+                --format=csv,noheader 2>&1 | sed 's/^/   gpu /'
+        done
+        return 0
+    fi
+
+    printf '%-14s %-10s %-5s %8s %10s %10s  %s\n' STEP STATE GPUS GPUUTIL GPUMEM ELAPSED NAME
+    for j in "${jobs[@]}"; do
+        local meta gpus name elapsed
+        meta=$(sacct -j "$j" -X -n -P -o State,AllocTRES,Elapsed,JobName 2>/dev/null | head -1)
+        state=${meta%%|*}; state=${state%% *}
+        gpus=$(printf '%s' "$meta" | grep -o 'gres/gpu=[0-9]*' | head -1 | cut -d= -f2)
+        elapsed=$(printf '%s' "$meta" | cut -d'|' -f3)
+        name=$(printf '%s' "$meta" | cut -d'|' -f4)
+        {
+            if [ "$state" = RUNNING ]; then
+                sstat -a -j "$j" -n -P -o JobID,TRESUsageInAve 2>/dev/null
+            else
+                sacct -j "$j" -n -P -o JobID,TRESUsageInAve 2>/dev/null
+            fi
+        } | awk -F'|' -v st="$state" -v g="${gpus:-0}" -v el="$elapsed" -v nm="$name" '
+            $1 ~ /\.extern$/ { next }
+            {
+                u = "-"; m = "-"
+                if (match($2, /gres\/gpuutil=[0-9.]+/)) u = substr($2, RSTART+13, RLENGTH-13)
+                if (match($2, /gres\/gpumem=[0-9.]+[KMGT]?/)) m = substr($2, RSTART+12, RLENGTH-12)
+                if (u == "-" && m == "-" && $2 == "") next      # the allocation line itself
+                flag = (u != "-" && u + 0 < 50) ? "  LOW" : ""
+                printf "%-14s %-10s %-5s %8s %10s %10s  %s%s\n", $1, st, g, (u == "-" ? u : u "%"), m, el, nm, flag
+                n++
+            }
+            END { if (!n) printf "%-14s %-10s %-5s %8s %10s %10s  %s\n", "(no steps yet)", st, g, "-", "-", el, nm }'
+    done
+}
+
 # pip -> uv pip when uv is available.
 # A function, not an alias: as an alias this expanded in place, so `pip install x`
 # became `if ...; fi install x` -- a syntax error on every invocation with an

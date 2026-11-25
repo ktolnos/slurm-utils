@@ -13,13 +13,15 @@ devbox-up attach 2   # tmux, straight to slot 2
 devbox-up restart    # apply an edit to config.sh or devbox.sh
 devbox-up stop       # stop the chain
 devbox-up config     # resolved config + the exact sbatch flags
+devbox-up tunnel start|stop|status   # the VS Code tunnel, on demand
 ```
 
 | File | What it is |
 |---|---|
 | `config.sh` | every knob, and the only place a cluster name appears |
 | `devbox.sh` | the job: tmux session, agent slots, tunnel, codex daemon, watchdog |
-| `devbox-up` | submit / status / attach / restart / stop, with preflight |
+| `devbox-up` | submit / status / attach / restart / stop / tunnel, with preflight |
+| `devbox-tunnel` | starts / stops the `code tunnel` window inside the box's tmux |
 | `pin-session` | `SessionStart` hook that keeps each slot's uuid honest |
 | `active-project` | the active project pointer, and the hook that tells sessions about it |
 | `slurm-guard` | `PreToolUse` hook: blocks the `scontrol update` that crashes slurmctld |
@@ -48,7 +50,12 @@ Two settings matter most on an unusual site:
 - **`DEVBOX_LOCAL`** — run the box as a plain background process instead of a
   Slurm job. For a site whose login node is meant to be used directly and is
   not itself Slurm compute: there is no walltime to escape, so the chaining
-  buys nothing and a job would only add a queue and a node hop.
+  buys nothing and a job would only add a queue and a node hop. Also for a
+  site where a CPU-only job is billed like GPU time (tidewater).
+- **`DEVBOX_TUNNEL`** — `1` (the default) starts the VS Code tunnel with the
+  box. `0` leaves it off until `devbox-up tunnel start`. The VS Code server is
+  the heavy part of the box, so on a shared login node it runs only while it is
+  in use. An agent in a slot can run that command for you.
 
 ## Porting to a new cluster
 

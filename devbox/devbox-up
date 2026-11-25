@@ -8,6 +8,9 @@
 #   devbox-up restart --now  ...and take the running box down, so it applies
 #                            immediately instead of at the next walltime
 #   devbox-up stop       stop the chain (stop file, then cancel)
+#   devbox-up tunnel [start|stop|status]
+#                        the VS Code tunnel, on demand (DEVBOX_TUNNEL=0 leaves it
+#                        off at boot); runs inside the job via srun when there is one
 #
 # `up` and `restart` update claude/codex/code first (DEVBOX_UPDATE=0, or
 # --no-update, to skip). The job launches whatever the symlinks point at then.
@@ -361,7 +364,7 @@ status)
         printf '  %-18s %s\n' "$DEVBOX_NAME-$s" "$(cat "$f" 2>/dev/null || echo '(not yet started)')"
     done
     echo "project : $("$DEVBOX_DIR/active-project" 2>/dev/null || echo "(none set -- using $DEVBOX_ROOT; set with: active-project <dir>)")"
-    echo "tunnel  : https://vscode.dev/tunnel/$DEVBOX_NAME"
+    echo "tunnel  : https://vscode.dev/tunnel/$DEVBOX_NAME ($([ "$DEVBOX_TUNNEL" = 0 ] && echo 'on demand: devbox-up tunnel start' || echo 'always on'))"
     # Read back what the job itself logged rather than asking codex anything:
     # the daemon's own `version` query reports liveness but not whether the
     # remote-control websocket is up, and a `start` from here would fight the
@@ -411,6 +414,18 @@ attach)
     if [ -n "${2:-}" ]; then srun --jobid="$j" --overlap --pty tmux attach -t "claude:agent$2"
     else srun --jobid="$j" --overlap --pty tmux attach -t claude; fi
     ;;
+tunnel)
+    # The tmux server is wherever the box is: here in local mode, inside the
+    # job otherwise -- where /tmp is job-private on some sites, so the socket is
+    # only reachable through a step of that job.
+    if [ "$DEVBOX_LOCAL" != 0 ]; then
+        local_running || { echo "no local devbox running on $(hostname -s)$([ -n "$(local_host)" ] && echo " (it was started on $(local_host))")"; exit 1; }
+        exec "$DEVBOX_DIR/devbox-tunnel" "${2:-status}"
+    fi
+    j=$(running_job); [ -n "$j" ] || { echo "no running $DEVBOX_JOB_NAME job"; exit 1; }
+    export DEVBOX_DIR
+    exec srun --jobid="$j" --overlap "$DEVBOX_DIR/devbox-tunnel" "${2:-status}"
+    ;;
 config)
     echo "cluster     : $DEVBOX_CLUSTER"
     echo "mode        : $([ "$DEVBOX_LOCAL" != 0 ] && echo "local (no Slurm job)" || echo 'slurm job')"
@@ -422,6 +437,7 @@ config)
     # No name of ours here: codex reports gethostname() to the app, so the box
     # shows up under the current node name and changes on every hop. The
     # environment behind it is stable, which is what actually matters.
+    echo "tunnel      : $([ "$DEVBOX_TUNNEL" = 0 ] && echo 'on demand (DEVBOX_TUNNEL=0): devbox-up tunnel start' || echo 'starts with the box')"
     echo "codex       : $([ "$DEVBOX_CODEX" != 0 ] && echo "on ($DEVBOX_CODEX_BIN), app shows the node's hostname" || echo 'off (DEVBOX_CODEX=0)')"
     echo "updates     : $([ "$DEVBOX_UPDATE" = 0 ] && echo 'off (DEVBOX_UPDATE=0)' || echo 'on at up/restart')"
     echo "  claude    : $(bin_version "$DEVBOX_CLAUDE_BIN") ($DEVBOX_CLAUDE_BIN)"
@@ -433,6 +449,6 @@ config)
     echo "preflight   :"; preflight && echo "  ok"
     ;;
 *)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

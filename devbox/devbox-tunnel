@@ -1,0 +1,78 @@
+#!/bin/bash
+# The devbox's VS Code tunnel, as its own start/stop so it can run on demand.
+#
+#   devbox-tunnel start    open the `tunnel` window in the devbox's tmux session
+#   devbox-tunnel stop     close it, and the VS Code server behind it
+#   devbox-tunnel status   running or not, and the URL
+#
+# Run it wherever the devbox's tmux server is: directly in local mode, or via
+# `devbox-up tunnel ...`, which goes through `srun --jobid --overlap` for a box
+# inside a Slurm job. devbox.sh calls `start` itself when DEVBOX_TUNNEL=1.
+#
+# On demand because the tunnel, not the agents, is what costs: the VS Code
+# server and its extension host are the part of the box that can grow to GBs and
+# whole cores, while three idle Claude sessions are a few hundred MB. Where the
+# box runs on a shared login node (tidewater) that is the difference between a
+# good neighbour and a bad one, so there it stays off until somebody asks.
+set -u
+DEVBOX_DIR="${DEVBOX_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# shellcheck source=config.sh
+source "$DEVBOX_DIR/config.sh"
+
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
+# Both keychain vars are load-bearing: without them `code tunnel user show`
+# reports logged in on the login node and not logged in on every compute node.
+export VSCODE_CLI_USE_FILE_KEYCHAIN=1 VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT=1
+export VSCODE_CLI_DATA_DIR="$DEVBOX_VSCODE_DATA_DIR" VSCODE_CLI_NONINTERACTIVE=1
+
+SESSION=claude
+LOG="$(devbox_tunnel_log)"
+
+have_window() { tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx tunnel; }
+running() {
+    have_window || return 1
+    # A window whose foreground process is a shell has lost its tunnel.
+    case "$(tmux display-message -p -t "$SESSION:tunnel" '#{pane_current_command}')" in
+        bash|sh|zsh) return 1 ;;
+    esac
+}
+
+start() {
+    tmux has-session -t "$SESSION" 2>/dev/null || { echo "tunnel: no devbox tmux session here -- is the box up?"; return 1; }
+    running && { echo "tunnel: already running -- https://vscode.dev/tunnel/$DEVBOX_NAME"; return 0; }
+    [ -x "$DEVBOX_CODE_BIN" ] || { echo "tunnel: no code CLI at $DEVBOX_CODE_BIN -- skipping"; return 1; }
+    "$DEVBOX_CODE_BIN" tunnel user show 2>&1 | grep -qi "logged in with" || {
+        echo "tunnel: code CLI not authenticated -- run '$DEVBOX_CODE_BIN tunnel user login --provider github'"; return 1; }
+    rm -f "$VSCODE_CLI_DATA_DIR/tunnel-stable.lock"   # stale lock from a killed box
+    mkdir -p "$DEVBOX_LOG_DIR"
+    have_window || tmux new-window -d -t "$SESSION" -n tunnel -c "$HOME"
+    # The working directory of the agents becomes the default folder in the
+    # vscode.dev/tunnel/... link. Never pipe `code tunnel` through tee
+    # unattended -- unauthenticated it redraws an interactive picker forever,
+    # hundreds of MB in under a minute. Hence the guard above, and the
+    # truncation in devbox.sh's watchdog.
+    local wd; wd=$("$DEVBOX_DIR/active-project" 2>/dev/null); [ -d "$wd" ] || wd=$DEVBOX_ROOT
+    tmux send-keys -t "$SESSION:tunnel" \
+        "cd '$wd'; '$DEVBOX_CODE_BIN' tunnel --accept-server-license-terms --name $DEVBOX_NAME >> '$LOG' 2>&1" C-m
+    echo "tunnel: started -- https://vscode.dev/tunnel/$DEVBOX_NAME (log: $LOG)"
+}
+
+stop() {
+    if ! have_window; then echo "tunnel: not running"; return 0; fi
+    # Ctrl-C first so `code tunnel` takes its server down with it; a bare
+    # kill-window SIGHUPs the pane and can leave the server's node processes
+    # behind, still holding memory, for nobody.
+    tmux send-keys -t "$SESSION:tunnel" C-c
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do running || break; sleep 1; done
+    tmux kill-window -t "$SESSION:tunnel" 2>/dev/null
+    echo "tunnel: stopped"
+}
+
+case "${1:-status}" in
+    start)  start ;;
+    stop)   stop ;;
+    status) if running; then echo "tunnel: running -- https://vscode.dev/tunnel/$DEVBOX_NAME"
+            else echo "tunnel: not running$([ "$DEVBOX_TUNNEL" = 0 ] && echo ' (on demand: devbox-up tunnel start)')"; fi ;;
+    *)      sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
