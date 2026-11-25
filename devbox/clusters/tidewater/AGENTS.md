@@ -121,14 +121,6 @@ I/O matters. Slurm sets no `TMPDIR` of its own here.
   the image provides the tools (`#!/bin/sh` unless it ships bash). Build images
   with `enroot import` on a login node. Never keep images or outputs in `/tmp`.
 - The Alliance module tree is loaded (`module avail`).
-- **No CUDA toolkit on the nodes** (`/usr/local/cuda` is absent). On B200,
-  vLLM 0.29 picks the FlashInfer attention backend, which JIT-builds kernels
-  with `nvcc`, so the engine fails at startup ("Ninja build failed ... nvcc: not
-  found"). Pass `attention_backend=` to `vllm.LLM` (the `VLLM_ATTENTION_BACKEND`
-  variable no longer exists): `FLASH_ATTN` (FlashAttention 4) for head dim 128
-  (Qwen3); **not for Gemma 4**, whose head-dim-256 layers fail an FA4 SM100
-  paged-KV assertion at engine start, so `TRITON_ATTN` there. `module load
-  cuda/12.9` or `cuda/13.2` would also provide `nvcc` if FlashInfer is wanted.
 - **Moving data between clusters:** the site has no Globus endpoint. The user
   runs a personal one, **`tidewater-eop`** (id
   `0d14ff71-e853-11f1-8855-0effc68fde15`). It is **off by default**: start it on

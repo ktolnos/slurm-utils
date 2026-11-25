@@ -87,6 +87,10 @@ the tree without appearing as tmux windows.
   need the same check. Skip it only when the user explicitly asks for that
   particular run. Smoke tests and debugging jobs of a few GPU-hours are fine
   without asking.
+- **Don't run a separate smoke job just to test new code.** Wait until the
+  real job is submitted and watch its first minutes: a crash at startup costs
+  the same either way, and the smoke job only adds a queue wait. Big jobs, such
+  as a large RL run, can still deserve a smoke job first; ask when unsure.
 - **Ask for the smallest GPU that fits.** Where a cluster partitions GPUs (MIG),
   a partition request reaches strictly more nodes than a whole card, so it
   usually starts sooner *and* leaves the big cards alone. The cluster's
