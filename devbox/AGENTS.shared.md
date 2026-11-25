@@ -3,6 +3,9 @@
 These hold on every cluster. The `AGENTS.md` that imports this one adds that
 cluster's own facts — account, GPU flags, walltime tiers, quotas, paths.
 
+Ask before editing AGENTS.md or memory files. Prefer fixing code so it runs
+without special arguments over recording settings to remember.
+
 ## The dev box is not a compute node
 
 This session runs inside the devbox (`devbox.sh`, driven by `devbox-up`) — on
