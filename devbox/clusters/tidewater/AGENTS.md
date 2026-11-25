@@ -43,7 +43,12 @@ Any other type string is rejected.
 
 Each node (`tn001-022`) has 8 B200s, 112 CPUs and 2 TB of RAM. Pair one GPU with
 **≤14 CPUs and ≤257 GB**. Billing takes the max, so CPUs or memory beyond that
-ratio are charged as extra GPUs. `DefMemPerGPU` is 240 GB, but always state
+ratio are charged as extra GPUs. Up to that ratio they cost nothing: a job is
+billed (and charged to fairshare) for the largest of its GPUs, CPUs/14 and
+memory/257 GB, and there the GPUs are the largest, so **request the full 14
+CPUs and 257 GB per GPU**. The one exception: the job is waiting for a node, and some nodes have
+free GPUs but not enough free CPUs or memory. Then a smaller request may start
+sooner. `DefMemPerGPU` is 240 GB, but always state
 `--mem` or `--mem-per-cpu`: with no memory request a job is given (and billed
 for) the whole node's memory.
 
