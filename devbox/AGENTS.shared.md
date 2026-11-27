@@ -79,8 +79,8 @@ the tree without appearing as tmux windows.
 
 ## Submitting jobs
 
-- **Get the experimental design approved before spending tens of GPU-hours.**
-  Before launching anything that adds up to tens of GPU-hours, show the user
+- **Get the experimental design approved before spending 5 GPU-hours.**
+  Before launching anything that adds up to 5 GPU-hours or more, show the user
   the design: the arms, the seeds, what each arm tests, and the GPU-hours per
   arm. Then wait for their OK. "Run the experiments" is not approval for an
   open-ended budget. Reruns, extra seeds and new arms added partway through
